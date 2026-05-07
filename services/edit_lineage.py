@@ -18,42 +18,27 @@ Conservative — only links when the stem match is unambiguous.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Optional
 
 from core.database import get_db
+# Pure stem-matching helpers moved to lens_core.edit_lineage.detector
+# 2026-05-07. Re-imported under the original underscored names so the rest
+# of this module's DB-walking logic keeps working unchanged.
+from lens_core.edit_lineage.detector import (
+    RAW_EXTS as _RAW_EXTS,
+    EDIT_EXTS as _EDIT_EXTS,
+    normalize_stem as _normalize_stem,
+)
+import re
 
-
-# RAW extensions LENS understands. Anything in this set is treated as an
-# "original" for lineage purposes — a RAW will never be marked as the edit
-# of another RAW.
-_RAW_EXTS = {
-    ".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".orf", ".rw2", ".pef",
-    ".srw", ".rwl", ".srf",
-}
-
-# Edited-output extensions. Lineage detection only fires for these.
-_EDIT_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp"}
-
-# Suffixes Lightroom and other editors append to exports. Stripped from the
-# stem before comparing to RAWs in the DB.
+# Compatibility: some downstream code may inspect _EDIT_SUFFIX_RE directly.
+# Mirror the regex from lens_core (kept local to avoid cross-package private import).
 _EDIT_SUFFIX_RE = re.compile(
     r"[-_\s](edit(ed)?|edits|final|export(ed)?|v\d+|v[0-9]+|hires|hi-res|"
     r"web|print|color|bw|b&w|retouched|enhanced)$",
     re.IGNORECASE,
 )
-
-
-def _normalize_stem(stem: str) -> str:
-    """Strip common edit suffixes so 'DSC01571_edit' matches 'DSC01571'."""
-    prev = None
-    s = stem
-    # Apply repeatedly in case of stacked suffixes ("DSC01571_v2_edit").
-    while s != prev:
-        prev = s
-        s = _EDIT_SUFFIX_RE.sub("", s)
-    return s
 
 
 def detect_parent_id(file_path: str | Path) -> Optional[int]:
