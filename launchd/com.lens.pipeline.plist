@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lens.pipeline</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/stevenhoward/lens/venv/bin/python</string>
+        <string>-c</string>
+        <string>import asyncio; from pipeline.queue_manager import run_full_pipeline_loop; asyncio.run(run_full_pipeline_loop())</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/stevenhoward/lens</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/stevenhoward/lens</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/stevenhoward/lens/logs/pipeline.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/stevenhoward/lens/logs/pipeline.error.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

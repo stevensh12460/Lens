@@ -1,0 +1,25 @@
+# Data + state
+data/*.db
+data/*.db-shm
+data/*.db-wal
+backups/
+logs/
+*.log
+*.pyc
+__pycache__/
+.venv/
+venv/
+.env
+.DS_Store
+
+# Generated
+/tmp/
+.coverage
+*.egg-info/
+.pytest_cache/
+
+# Specific local state
+/AUTO_PUBLISH_DISABLED
+
+# Local environment
+.env*

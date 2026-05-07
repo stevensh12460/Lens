@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "lens-api",
+      "runtimeExecutable": "/Users/stevenhoward/lens/venv/bin/python",
+      "runtimeArgs": ["-m", "api.main"],
+      "port": 8600
+    },
+    {
+      "name": "lens-dashboard",
+      "runtimeExecutable": "/Users/stevenhoward/lens/venv/bin/python",
+      "runtimeArgs": ["dashboard/serve.py"],
+      "port": 8800
+    }
+  ]
+}

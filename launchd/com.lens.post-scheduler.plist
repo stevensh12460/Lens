@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lens.post-scheduler</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/stevenhoward/lens/venv/bin/python</string>
+        <string>-m</string>
+        <string>services.post_scheduler</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/stevenhoward/lens</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/stevenhoward/lens</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Fire every 5 minutes. The scheduler itself enforces a ±15 min window
+         so a brief launchd outage won't cause a missed post. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!-- Don't fire instantly on bootstrap; wait until the first interval tick. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Single-shot per fire. launchd will not start a new run while a previous
+         one is still in flight; combined with the 5min interval this prevents
+         double-publishes from overlapping invocations. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/stevenhoward/lens/logs/post-scheduler.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/stevenhoward/lens/logs/post-scheduler.error.log</string>
+</dict>
+</plist>

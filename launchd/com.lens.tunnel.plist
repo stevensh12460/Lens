@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lens.tunnel</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/cloudflared/bin/cloudflared</string>
+        <string>tunnel</string>
+        <string>--url</string>
+        <string>http://localhost:8600</string>
+        <string>--no-autoupdate</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/stevenhoward/lens/logs/tunnel.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/stevenhoward/lens/logs/tunnel.error.log</string>
+</dict>
+</plist>
