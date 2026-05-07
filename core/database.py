@@ -12,11 +12,22 @@ def _get_connection() -> sqlite3.Connection:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(_DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
+    # Connection pragmas — applied on every fresh connection. See
+    # ~/Code/lens-core (when extracted) for the canonical helper.
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=FULL")           # safer write durability
-    conn.execute("PRAGMA wal_autocheckpoint=200")     # checkpoint every ~800KB to keep WAL small
+    # NORMAL is corruption-safe under WAL and ~10x faster on writes than FULL.
+    # The WAL provides the durability guarantees that FULL adds elsewhere.
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA wal_autocheckpoint=200")     # checkpoint to keep WAL small
     conn.execute("PRAGMA journal_size_limit=67108864") # cap WAL at 64MB
     conn.execute("PRAGMA foreign_keys=ON")
+    # Phase 0 hardening (added 2026-05-07):
+    conn.execute("PRAGMA cache_size=-65536")    # 64 MB page cache (default ~2 MB)
+    conn.execute("PRAGMA temp_store=MEMORY")    # sort/temp in RAM, not on disk
+    conn.execute("PRAGMA mmap_size=4294967296") # 4 GB mmap — bounded so it doesn't
+                                                # contend with Ollama's 17-25 GB VRAM
+                                                # on this 32 GB unified-memory machine.
+    conn.execute("PRAGMA busy_timeout=5000")    # retry 5s on lock contention
     return conn
 
 

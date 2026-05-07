@@ -790,7 +790,7 @@ def get_calendar_post(post_id: int):
                    i.narrative_hook, i.caption_seed_phrases,
                    i.recommended_caption_tone, i.recommended_pillar,
                    i.dominant_visual_element, i.viewer_emotion_target,
-                   i.user_context
+                   i.user_context, i.edited_from_id, i.manual_added
             FROM calendar_posts cp
             LEFT JOIN images i ON cp.image_id = i.id
             WHERE cp.id = ?
