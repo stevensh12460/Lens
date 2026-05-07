@@ -29,10 +29,28 @@ from core.database import get_db
 from core.config import settings
 from core.tz import now_et, parse_et, to_iso_et, minutes_between
 
+# Graph API client + helpers moved to lens_core.publisher.instagram 2026-05-07.
+# Re-imported under the same names so the rest of this file's helpers
+# (_check_tunnel, _check_token, auto_publish_due) keep working with no changes
+# to the surrounding orchestration.
+from lens_core.publisher.instagram import (
+    GRAPH_API,
+    CONTAINER_POLL_SECONDS,
+    CONTAINER_MAX_POLLS,
+    IGAccount,
+    create_container as _create_container_core,
+    poll_container as _poll_container_core,
+    publish_container as _publish_container_core,
+)
 
-GRAPH_API = "https://graph.facebook.com/v19.0"
-CONTAINER_POLL_SECONDS = 3
-CONTAINER_MAX_POLLS = 20  # 60s total — IG usually finishes in <10s
+
+def _lens_account() -> IGAccount:
+    """Build the singleton LENS IG account from settings."""
+    return IGAccount(
+        user_id=settings.instagram_account_id,
+        access_token=settings.instagram_access_token,
+        public_image_base_url=getattr(settings, "public_image_base_url", "") or "",
+    )
 
 # Auto-publish window: how close to scheduled_at we'll fire. Anything older or
 # newer than this is silently ignored. Prevents stale posts going out hours late.
@@ -73,54 +91,18 @@ def _resolve_public_image_url(post: dict) -> str | None:
     return None
 
 
+# Three-step publish helpers moved to lens_core.publisher.instagram. Local
+# wrappers below preserve the existing call sites (publish_post uses these).
 async def _create_container(client: httpx.AsyncClient, image_url: str, caption: str) -> dict:
-    """Step 1: stage the post as a container. Container is NOT yet visible publicly."""
-    url = f"{GRAPH_API}/{settings.instagram_account_id}/media"
-    params = {
-        "image_url": image_url,
-        "caption": caption,
-        "access_token": settings.instagram_access_token,
-    }
-    r = await client.post(url, params=params, timeout=30)
-    if r.status_code != 200:
-        return {"ok": False, "error": f"create_container: {r.status_code} {r.text}"}
-    data = r.json()
-    creation_id = data.get("id")
-    if not creation_id:
-        return {"ok": False, "error": f"create_container: no id in response {data}"}
-    return {"ok": True, "creation_id": creation_id}
+    return await _create_container_core(client, _lens_account(), image_url, caption)
 
 
 async def _poll_container(client: httpx.AsyncClient, creation_id: str) -> dict:
-    """Step 2: poll until container reports FINISHED (or ERROR)."""
-    url = f"{GRAPH_API}/{creation_id}"
-    for attempt in range(CONTAINER_MAX_POLLS):
-        params = {"fields": "status_code,status", "access_token": settings.instagram_access_token}
-        r = await client.get(url, params=params, timeout=15)
-        if r.status_code != 200:
-            return {"ok": False, "error": f"poll: {r.status_code} {r.text}"}
-        data = r.json()
-        code = data.get("status_code")
-        if code == "FINISHED":
-            return {"ok": True, "status_code": code, "polls": attempt + 1}
-        if code in ("ERROR", "EXPIRED"):
-            return {"ok": False, "error": f"container {code}: {data.get('status', '')}"}
-        await asyncio.sleep(CONTAINER_POLL_SECONDS)
-    return {"ok": False, "error": "container did not finish within poll budget"}
+    return await _poll_container_core(client, _lens_account(), creation_id)
 
 
 async def _publish_container(client: httpx.AsyncClient, creation_id: str) -> dict:
-    """Step 3: actually post the container. THIS IS THE PUBLIC ACTION."""
-    url = f"{GRAPH_API}/{settings.instagram_account_id}/media_publish"
-    params = {"creation_id": creation_id, "access_token": settings.instagram_access_token}
-    r = await client.post(url, params=params, timeout=30)
-    if r.status_code != 200:
-        return {"ok": False, "error": f"publish: {r.status_code} {r.text}"}
-    data = r.json()
-    media_id = data.get("id")
-    if not media_id:
-        return {"ok": False, "error": f"publish: no media id in response {data}"}
-    return {"ok": True, "media_id": media_id}
+    return await _publish_container_core(client, _lens_account(), creation_id)
 
 
 async def publish_post(post_id: int, dry_run: bool = True) -> dict:
