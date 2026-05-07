@@ -99,85 +99,14 @@ def _parse_tags(tags_raw: str) -> str:
     return tags_raw
 
 
-# Single source of truth for cliché phrases. Used by:
-#   1. _scrub() — removes them from rich-context fields before they're injected
-#      into the prompt (they were leaking from the 32b vision narrative_hook).
-#   2. The instagram prompt's FORBIDDEN block (rendered from this list).
-# Order matters: longer phrases first so they're matched before their substrings.
-_FORBIDDEN_PHRASES: list[str] = [
-    "invite the viewer to",
-    "inviting the viewer to",
-    "invite you to",
-    "fleeting moments of",
-    "fleeting moment",
-    "fleeting beauty",
-    "in this moment",
-    "a moment of",
-    "this moment",
-    "every moment",
-    "every ripple",
-    "every glance",
-    "every look",
-    "stop and ",
-    "take a moment to",
-    "take a moment",
-    "pause and",
-    "pause to",
-    "pause for",
-    "be still",
-    "find peace",
-    "find yourself",
-    "slow down",
-    "speak volumes",
-    "speaks volumes",
-    "tells a story of",
-    "embraced by",
-    "captured this",
-    "captured by",
-    "capturing the",
-    "capturing a",
-    "capturing an",
-    "There's something about",
-    "There's something undeniable",
-    "stillness",
-    "pause",
-    "embrace",
-    "breathe",
-    "reflect on",
-    "connect with",
-    "evoke",
-    "evokes",
-    "evoking",
-]
-
-
-def _scrub(text: str | None) -> str:
-    """Remove forbidden cliché phrases from a text fragment before it's
-    injected into the prompt. The 32b vision model writes narrative_hook
-    fields like "...inviting the viewer to reflect on the fleeting moments..."
-    and the 14b text model would echo those words verbatim.
-
-    Substring removal (case-insensitive). If the result becomes too short or
-    empty, return empty string so the caller can omit the line entirely.
-    """
-    if not text:
-        return ""
-    out = str(text)
-    for phrase in _FORBIDDEN_PHRASES:
-        # case-insensitive replace
-        idx = 0
-        while True:
-            pos = out.lower().find(phrase.lower(), idx)
-            if pos == -1:
-                break
-            out = out[:pos] + out[pos + len(phrase):]
-            idx = pos
-    # Collapse double spaces and trim trailing punctuation/comma artifacts
-    out = " ".join(out.split())
-    out = out.strip(" ,.;:—-")
-    if len(out) < 8:
-        return ""
-    return out
+# Forbidden-phrase list + scrubber moved to lens_core.caption.cliche_filter
+# 2026-05-07. The list is generic across all LLM-prose projects (LENS,
+# Kitchen Window). Re-exported here under the original underscored names so
+# the rest of caption_gen.py keeps working with no other changes.
+from lens_core.caption.cliche_filter import (
+    FORBIDDEN_PHRASES_DEFAULT as _FORBIDDEN_PHRASES,
+    scrub as _scrub,
+)
 
 
 def _recent_captions_block() -> str:

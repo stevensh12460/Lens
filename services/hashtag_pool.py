@@ -1,39 +1,37 @@
 """
-services/hashtag_pool.py
+services/hashtag_pool.py — LENS-specific hashtag taxonomy.
 
-Deterministic hashtag assembly. Replaces in-prompt hashtag generation —
-the 32b text model used to spend 30% of its output budget guessing tags.
-Now we look them up in O(1) and merge with image-specific tags from pass3.
+The engine moved to `lens_core.caption.hashtag_engine` 2026-05-07. This file
+now defines the LENS taxonomy data and re-exports `build_hashtags()` so the
+existing call sites (`from services.hashtag_pool import build_hashtags`)
+keep working unchanged.
 
-Usage:
-    from services.hashtag_pool import build_hashtags
-    tags = build_hashtags(genre="nature", subject_type="landscape",
-                          mood="serene", pass3_tags=["golden hour", "river"],
-                          target_count=22)
-
-Editable: tweak the dicts below to refine the brand voice.
+Edit the dicts below to refine the LENS brand voice.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Iterable
+from lens_core.caption.hashtag_engine import (
+    HashtagTaxonomy,
+    build_hashtags as _build_hashtags,
+    parse_pass3_tags,
+    slugify_tag,
+)
 
-# Core brand identity — appears on every post.
+# ── LENS taxonomy ────────────────────────────────────────────────────────────
+
 BRAND_TAGS = [
     "MoodyValleyStills",
     "HudsonValleyNY",
     "HudsonValleyPhotographer",
 ]
 
-# Generic photography reach tags — broad audience, every post.
 REACH_TAGS = [
     "Photography",
     "PhotoOfTheDay",
     "FineArtPhotography",
 ]
 
-# Per-genre core set. Picked for engagement, not just volume.
 GENRE_TAGS: dict[str, list[str]] = {
     "nature": [
         "NaturePhotography", "LandscapePhotography", "NatureLovers",
@@ -66,7 +64,6 @@ GENRE_TAGS: dict[str, list[str]] = {
     ],
 }
 
-# Mood-specific colour. Mostly atmospheric tags.
 MOOD_TAGS: dict[str, list[str]] = {
     "serene":     ["StillnessInNature", "QuietMoments", "Tranquility"],
     "dramatic":   ["DramaticLight", "MoodyTones", "ShadowPlay"],
@@ -80,7 +77,6 @@ MOOD_TAGS: dict[str, list[str]] = {
     "contemplative": ["ContemplativeMood", "Solitude"],
 }
 
-# Lighting / time-of-day flavor.
 LIGHTING_TAGS: dict[str, list[str]] = {
     "golden hour":   ["GoldenHour", "GoldenHourPhotography", "MagicHour"],
     "blue hour":     ["BlueHour", "TwilightPhotography"],
@@ -91,7 +87,6 @@ LIGHTING_TAGS: dict[str, list[str]] = {
     "natural light": ["NaturalLightPhotography"],
 }
 
-# Subject-type flavor — adds specificity.
 SUBJECT_TAGS: dict[str, list[str]] = {
     "landscape":     ["LandscapeLovers", "LandscapesOfTheWorld"],
     "couple":        ["CouplePhotography", "EngagementShoot"],
@@ -101,48 +96,17 @@ SUBJECT_TAGS: dict[str, list[str]] = {
     "product":       ["ProductShoot"],
 }
 
-
-def _slugify_tag(raw: str) -> str | None:
-    """Convert a free-text tag like 'oak tree' or 'mother-son' into '#OakTree' / '#MotherSon'.
-    Returns None if unusable (too short, all digits, etc.).
-    Hyphens, underscores, and slashes are treated as word separators so camelcase preserves.
-    """
-    if not raw or not isinstance(raw, str):
-        return None
-    # Replace separators with spaces before stripping non-alnum so word boundaries survive.
-    normalized = raw.strip()
-    for sep in ("-", "_", "/", "\\"):
-        normalized = normalized.replace(sep, " ")
-    cleaned = "".join(c for c in normalized if c.isalnum() or c.isspace())
-    parts = [p for p in cleaned.split() if p]
-    if not parts:
-        return None
-    slug = "".join(p[:1].upper() + p[1:].lower() for p in parts)
-    if len(slug) < 3 or slug.isdigit():
-        return None
-    return slug
+LENS_TAXONOMY = HashtagTaxonomy(
+    brand_tags=BRAND_TAGS,
+    genre_tags=GENRE_TAGS,
+    mood_tags=MOOD_TAGS,
+    lighting_tags=LIGHTING_TAGS,
+    subject_tags=SUBJECT_TAGS,
+    reach_tags=REACH_TAGS,
+)
 
 
-def _parse_pass3_tags(tags_field: str | list | None) -> list[str]:
-    """Pass3 stores tags as JSON array string. Parse and slugify."""
-    if not tags_field:
-        return []
-    if isinstance(tags_field, list):
-        raw_list = tags_field
-    else:
-        try:
-            raw_list = json.loads(tags_field)
-            if not isinstance(raw_list, list):
-                return []
-        except (json.JSONDecodeError, TypeError):
-            return []
-    out: list[str] = []
-    for t in raw_list:
-        slug = _slugify_tag(str(t))
-        if slug:
-            out.append(slug)
-    return out
-
+# ── Compatibility wrapper ────────────────────────────────────────────────────
 
 def build_hashtags(
     genre: str | None,
@@ -152,52 +116,21 @@ def build_hashtags(
     pass3_tags: str | list | None = None,
     target_count: int = 22,
 ) -> list[str]:
-    """Assemble a deterministic hashtag list for an Instagram post.
+    """LENS-flavored shortcut. Same signature the rest of LENS already calls."""
+    return _build_hashtags(
+        LENS_TAXONOMY,
+        genre=genre,
+        subject_type=subject_type,
+        mood=mood,
+        lighting=lighting,
+        pass3_tags=pass3_tags,
+        target_count=target_count,
+    )
 
-    Order of inclusion (each appended only if not already present, capped at target_count):
-      1. Brand tags (always)
-      2. Genre tags
-      3. Mood tags
-      4. Lighting tags
-      5. Subject tags
-      6. Image-specific pass3 tags (slugified)
-      7. Reach tags (filler)
 
-    Returns a list of strings WITH leading '#' so callers can splice directly.
-    """
-    seen: set[str] = set()
-    out: list[str] = []
-
-    def add(tag: str) -> None:
-        key = tag.lower()
-        if key in seen or len(out) >= target_count:
-            return
-        seen.add(key)
-        out.append(f"#{tag}")
-
-    for t in BRAND_TAGS:
-        add(t)
-
-    if genre:
-        for t in GENRE_TAGS.get(genre.lower(), []):
-            add(t)
-
-    if mood:
-        for t in MOOD_TAGS.get(mood.lower(), []):
-            add(t)
-
-    if lighting:
-        for t in LIGHTING_TAGS.get(lighting.lower(), []):
-            add(t)
-
-    if subject_type:
-        for t in SUBJECT_TAGS.get(subject_type.lower(), []):
-            add(t)
-
-    for t in _parse_pass3_tags(pass3_tags):
-        add(t)
-
-    for t in REACH_TAGS:
-        add(t)
-
-    return out
+# Re-export the helpers in case any other module imports them from here.
+__all__ = [
+    "BRAND_TAGS", "REACH_TAGS", "GENRE_TAGS", "MOOD_TAGS",
+    "LIGHTING_TAGS", "SUBJECT_TAGS", "LENS_TAXONOMY",
+    "build_hashtags", "slugify_tag", "parse_pass3_tags",
+]
