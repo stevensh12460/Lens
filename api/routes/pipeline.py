@@ -9,6 +9,7 @@ from typing import Optional
 
 from core.database import get_db
 from pipeline.queue_manager import enqueue
+from lens_core.tz import now_et
 
 router = APIRouter()
 
@@ -591,7 +592,7 @@ def priority_start(req: PriorityRequest):
             "folders": [req.path],
             "image_paths": paths_str,
             "image_count": len(all_files),
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": now_et().isoformat(),
         }
         _PRIORITY_STATE_FILE.write_text(json.dumps(state))
 
@@ -650,7 +651,7 @@ def priority_status():
         # Images that won't continue (culled/duplicate/fail) — these are "done"
         terminal_rows = conn.execute(
             f"""SELECT pass1_status, COUNT(*) as c FROM images
-                WHERE pass1_status IN ('fail', 'duplicate', 'raw_review')
+                WHERE pass1_status IN ('fail', 'duplicate', 'raw_review', 'missing', 'sidecar', 'corrupt', 'video')
                 AND file_path IN ({placeholders})
                 GROUP BY pass1_status""",
             image_paths
@@ -1093,7 +1094,7 @@ def resolve_error(error_id: int):
         from datetime import datetime
         conn.execute(
             "UPDATE error_log SET resolved = TRUE, resolved_at = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), error_id),
+            (now_et().isoformat(), error_id),
         )
         return {"status": "resolved", "error_id": error_id}
 
@@ -1105,7 +1106,7 @@ def resolve_all_errors():
         from datetime import datetime
         r = conn.execute(
             "UPDATE error_log SET resolved = TRUE, resolved_at = ? WHERE resolved = FALSE",
-            (datetime.utcnow().isoformat(),),
+            (now_et().isoformat(),),
         )
         return {"status": "resolved", "count": r.rowcount}
 

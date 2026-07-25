@@ -17,6 +17,7 @@ from core.database import get_db, log_error
 from pipeline import pass0_metadata, pass1_cull, pass2_nima, pass3_tag, privacy_filter
 from pipeline import priority_queue, nightly_report
 from pipeline import social_evaluator
+from lens_core.tz import now_et
 
 logger = logging.getLogger("lens.queue")
 
@@ -162,7 +163,7 @@ def _fetch_batch(job_type: str) -> list[dict]:
                WHERE j.job_type = ? AND j.status = 'queued'
                AND j.attempts < {_MAX_ATTEMPTS}
                AND i.file_name NOT LIKE '.\\_%' ESCAPE '\\'
-               AND COALESCE(i.pass1_status, 'pending') != 'fail'
+               AND COALESCE(i.pass1_status, 'pending') NOT IN ('fail', 'missing', 'sidecar', 'corrupt', 'video')
                {priority_filter}
                ORDER BY j.priority DESC, j.queued_at ASC
                LIMIT ?""",
@@ -172,7 +173,7 @@ def _fetch_batch(job_type: str) -> list[dict]:
 
 
 def _mark_running(job_ids: list[int], worker_id: int = 0) -> None:
-    now = datetime.utcnow().isoformat()
+    now = now_et().isoformat()
     with _db_write_lock, get_db() as conn:
         placeholders = ",".join("?" * len(job_ids))
         conn.execute(
@@ -197,7 +198,7 @@ class _HeartbeatThread(threading.Thread):
                     placeholders = ",".join("?" * len(self._job_ids))
                     conn.execute(
                         f"UPDATE pipeline_jobs SET heartbeat_at = ? WHERE id IN ({placeholders}) AND status = 'running'",
-                        [datetime.utcnow().isoformat(), *self._job_ids],
+                        [now_et().isoformat(), *self._job_ids],
                     )
             except Exception:
                 pass  # non-fatal — watchdog will catch truly stuck jobs
@@ -211,7 +212,7 @@ def _mark_complete(job_ids: list[int]) -> None:
         placeholders = ",".join("?" * len(job_ids))
         conn.execute(
             f"UPDATE pipeline_jobs SET status = 'complete', completed_at = ? WHERE id IN ({placeholders})",
-            [datetime.utcnow().isoformat(), *job_ids],
+            [now_et().isoformat(), *job_ids],
         )
 
 
@@ -545,7 +546,7 @@ def _check_priority_complete() -> bool:
         # raw_review is terminal in priority mode — salvage is skipped
         terminal = conn.execute(
             f"""SELECT COUNT(*) FROM images
-                WHERE pass1_status IN ('fail', 'duplicate', 'raw_review')
+                WHERE pass1_status IN ('fail', 'duplicate', 'raw_review', 'missing', 'sidecar', 'corrupt', 'video')
                 AND file_path IN ({placeholders})""",
             image_paths
         ).fetchone()[0]
@@ -565,7 +566,7 @@ def _check_priority_complete() -> bool:
             f"""SELECT COUNT(DISTINCT i.id) FROM images i
                 JOIN pipeline_jobs j ON j.image_id = i.id
                 WHERE j.status = 'error' AND j.priority >= {_PRIORITY_THRESHOLD}
-                AND i.pass3_at IS NULL AND i.pass1_status NOT IN ('fail', 'duplicate')
+                AND i.pass3_at IS NULL AND i.pass1_status NOT IN ('fail', 'duplicate', 'missing', 'sidecar', 'corrupt', 'video')
                 AND i.file_path IN ({placeholders})""",
             image_paths
         ).fetchone()[0]

@@ -13,6 +13,7 @@ venv/
 .DS_Store
 
 # Generated
+cache/
 /tmp/
 .coverage
 *.egg-info/

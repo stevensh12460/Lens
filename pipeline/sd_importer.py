@@ -13,6 +13,7 @@ from typing import Optional
 
 from core.config import settings
 from core.database import get_db
+from lens_core.tz import now_et
 
 logger = logging.getLogger("lens.sd_importer")
 
@@ -261,7 +262,7 @@ def import_sd_card(
     dest_base = Path(destination_base) if destination_base else settings.photo_watch_path
 
     # Build shoot folder name: YYYY-MM-DD_shoot_name (spaces → underscores)
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = now_et().strftime("%Y-%m-%d")
     safe_name = shoot_name.strip().replace(" ", "_").replace("/", "_")
     shoot_folder = dest_base / f"{date_str}_{safe_name}"
     shoot_folder.mkdir(parents=True, exist_ok=True)
@@ -303,7 +304,7 @@ def import_sd_card(
         "total": len(file_list),
         "copied": 0,
         "failed": 0,
-        "started_at": datetime.now().isoformat(),
+        "started_at": now_et().isoformat(),
     })
 
     copied = 0
@@ -356,7 +357,7 @@ def import_sd_card(
                 "total": len(file_list),
                 "copied": copied,
                 "failed": failed,
-                "started_at": datetime.now().isoformat(),
+                "started_at": now_et().isoformat(),
             })
 
     # Update import_logs with final result
@@ -384,7 +385,7 @@ def import_sd_card(
         "copied": copied,
         "failed": failed,
         "failed_files": failed_files,
-        "completed_at": datetime.now().isoformat(),
+        "completed_at": now_et().isoformat(),
     })
 
     logger.info(

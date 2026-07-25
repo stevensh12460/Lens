@@ -25,6 +25,7 @@ logger = logging.getLogger("lens.pass1")
 
 from core.config import settings
 from core.database import get_db
+from lens_core.tz import now_et
 
 _BLUR_THRESHOLD = settings.blur_threshold
 _EXPOSURE_LOW = settings.exposure_low
@@ -64,7 +65,13 @@ def _get_face_cascade():
 
 
 def _decode_raw(image_path: Path) -> Optional[np.ndarray]:
-    """Decode a RAW file to a numpy BGR array using rawpy."""
+    """Decode a RAW file to a numpy BGR array using rawpy.
+
+    Some older CR2/ARW files have damaged sensor data — LibRaw reports
+    "data corrupted at <offset>" — while still carrying an intact
+    full-resolution embedded JPEG. The photo is fine; only the raw payload
+    rotted. Fall back to that preview rather than discarding the image.
+    """
     try:
         import rawpy
         with rawpy.imread(str(image_path)) as raw:
@@ -75,6 +82,24 @@ def _decode_raw(image_path: Path) -> Optional[np.ndarray]:
                 output_bps=8,
             )
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return _decode_raw_preview(image_path)
+
+
+def _decode_raw_preview(image_path: Path) -> Optional[np.ndarray]:
+    """Last resort: pull the embedded JPEG preview out of a damaged RAW."""
+    try:
+        import io
+        import rawpy
+        from PIL import Image as _PILImage
+        with rawpy.imread(str(image_path)) as raw:
+            thumb = raw.extract_thumb()
+        if thumb.format == rawpy.ThumbFormat.JPEG:
+            img = _PILImage.open(io.BytesIO(thumb.data)).convert("RGB")
+            arr = np.asarray(img)
+        else:
+            arr = np.asarray(thumb.data)
+        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
     except Exception:
         return None
 
@@ -572,7 +597,7 @@ def _commit_result(analysis: dict, shoot_id: Optional[int] = None,
                highlight_clipping = ?, shadow_clipping = ?, noise_estimate = ?
                WHERE id = ?""",
             (analysis["blur_score"], analysis["exposure_score"], is_duplicate, duplicate_of,
-             status, datetime.utcnow().isoformat(), phash_val,
+             status, now_et().isoformat(), phash_val,
              analysis.get("cull_score"), cull_sub_json,
              analysis.get("highlight_clipping"), analysis.get("shadow_clipping"),
              analysis.get("noise_estimate"), image_id),
@@ -645,7 +670,7 @@ async def process_batch_async(image_paths: list[Path], shoot_id: Optional[int] =
                         """UPDATE images SET pass1_status = ?, raw_potential = ?, raw_potential_notes = ?,
                            pass1_at = ? WHERE id = ?""",
                         (final_status, potential["raw_potential"], potential["raw_potential_notes"],
-                         datetime.utcnow().isoformat(), row["id"]),
+                         now_et().isoformat(), row["id"]),
                     )
             results.append({"file_path": str(path), "pass1_status": final_status, **potential})
         except Exception as e:

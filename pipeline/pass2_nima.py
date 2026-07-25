@@ -27,6 +27,7 @@ logger = logging.getLogger("lens.pass2")
 
 from core.config import settings
 from core.database import get_db
+from lens_core.tz import now_et
 
 _DEVICE = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 _MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
@@ -59,13 +60,31 @@ _WEIGHTS_NO_FACES = {
 # ─── Image loading ────────────────────────────────────────────────────────────
 
 
+def _open_raw_preview(source_path: Path) -> "Image.Image":
+    """Embedded JPEG preview from a RAW whose sensor data is damaged.
+
+    Older CR2/ARW files can rot in the raw payload while the full-resolution
+    preview stays intact. Scoring the preview beats losing the photo.
+    """
+    import io
+    import rawpy
+    with rawpy.imread(str(source_path)) as raw:
+        thumb = raw.extract_thumb()
+    if thumb.format == rawpy.ThumbFormat.JPEG:
+        return Image.open(io.BytesIO(thumb.data)).convert("RGB")
+    return Image.fromarray(thumb.data).convert("RGB")
+
+
 def _open_image(image_path: Path) -> Image.Image:
     """Open any image including RAW formats, return a PIL Image in RGB mode."""
     if image_path.suffix.lower() in _RAW_EXTENSIONS:
         import rawpy
-        with rawpy.imread(str(image_path)) as raw:
-            rgb = raw.postprocess(use_camera_wb=True, half_size=True, no_auto_bright=False, output_bps=8)
-        return Image.fromarray(rgb)
+        try:
+            with rawpy.imread(str(image_path)) as raw:
+                rgb = raw.postprocess(use_camera_wb=True, half_size=True, no_auto_bright=False, output_bps=8)
+            return Image.fromarray(rgb)
+        except Exception:
+            return _open_raw_preview(image_path)
     return Image.open(image_path).convert("RGB")
 
 
@@ -800,7 +819,7 @@ def process_batch(image_paths: list[Path]) -> list[dict]:
 
     # ── Phase 4: Combine & batch DB write ──
     results = []
-    now = datetime.utcnow().isoformat()
+    now = now_et().isoformat()
 
     with get_db() as conn:
         for p in valid:

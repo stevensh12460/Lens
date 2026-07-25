@@ -430,13 +430,16 @@ _PASS1_RAW_COLUMNS: list[tuple[str, str]] = [
 
 # Pass 3 enrichment columns — rich 32b output fields
 _PASS3_ENRICHMENT_COLUMNS: list[tuple[str, str]] = [
-    ("description",      "TEXT"),   # 2-3 sentence narrative
-    ("composition",      "TEXT"),   # compositional technique
-    ("subjects",         "TEXT"),   # specific subjects as JSON array
-    ("print_notes",      "TEXT"),   # why it works as a print
-    ("technical_issues", "TEXT"),   # motion blur, chromatic aberration, etc.
-    ("emotional_impact", "TEXT"),   # emotional impact statement
-    ("pass3_model",      "TEXT"),   # model used: 'qwen2.5vl:7b' or 'qwen2.5vl:32b'
+    ("description",        "TEXT"),   # 2-3 sentence narrative
+    ("composition",        "TEXT"),   # compositional technique
+    ("subjects",           "TEXT"),   # specific subjects as JSON array
+    ("print_notes",        "TEXT"),   # why it works as a print
+    ("technical_issues",   "TEXT"),   # motion blur, chromatic aberration, etc.
+    ("emotional_impact",   "TEXT"),   # emotional impact statement
+    ("pass3_model",        "TEXT"),   # model used: 'qwen2.5vl:7b' or 'qwen2.5vl:32b'
+    ("texture_vocabulary", "TEXT"),   # JSON array of 3-5 texture words
+    ("verb_seeds",         "TEXT"),   # JSON array of 3-5 active verbs/gerunds
+    ("visual_tension",     "TEXT"),   # one short phrase on the productive contradiction
 ]
 
 # Phase 7b: Print Business columns for images table
@@ -491,6 +494,69 @@ _PIPELINE_JOBS_COLUMNS: list[tuple[str, str]] = [
     ("heartbeat_at", "DATETIME"),
     ("worker_id",    "INTEGER"),
 ]
+
+# ---------------------------------------------------------------------------
+# Website publishing (Lightroom publish service -> shp-site).
+#
+# Deliberately its own table rather than columns on images:
+#   * one photograph can appear in two sections (a portrait used on both the
+#     portraits and weddings pages), which columns cannot express;
+#   * images.posted_at / posted_to belong to the Instagram queue. Overloading
+#     them would make web-published photos vanish from that queue, since it
+#     filters on `content_ready AND posted_at IS NULL`.
+#
+# lr_photo_uuid is Lightroom's per-photo uuid, NOT file_path: virtual copies
+# all report the master's path, so a web crop kept as a virtual copy would
+# collide with its master. UNIQUE(section, lr_photo_uuid) is the idempotency
+# contract that stops a timed-out publish from allocating a second slug and
+# putting the same photograph on the live site twice.
+#
+# layout is STORED, never recomputed. Measured against the live site: three
+# landscape frames at identical 1.78 aspect carry two different classes, and a
+# 0.80 portrait is `wide` in one slot and `tall` in another. `wide` is a
+# full-width breath placed for rhythm, so it is a property of position in the
+# sequence, not of the image. Recomputing it would destroy the hand-tuned order.
+# ---------------------------------------------------------------------------
+_WEB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS web_assets (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    section            TEXT NOT NULL,
+    slug               TEXT NOT NULL,
+    lr_photo_uuid      TEXT,
+    image_id           INTEGER REFERENCES images(id),
+    source_path        TEXT,
+    file_name          TEXT NOT NULL,
+    sha256             TEXT,
+    width              INTEGER,
+    height             INTEGER,
+    layout             TEXT,
+    alt_text           TEXT,
+    caption            TEXT,
+    sort_index         INTEGER NOT NULL,
+    state              TEXT NOT NULL DEFAULT 'live',
+    first_published_at DATETIME,
+    last_published_at  DATETIME,
+    removed_at         DATETIME,
+    UNIQUE(section, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_web_assets_section ON web_assets(section, sort_index);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_web_assets_uuid
+    ON web_assets(section, lr_photo_uuid) WHERE lr_photo_uuid IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS web_publish_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    at         DATETIME NOT NULL,
+    section    TEXT,
+    action     TEXT,
+    added      INTEGER DEFAULT 0,
+    removed    INTEGER DEFAULT 0,
+    reordered  BOOLEAN DEFAULT FALSE,
+    commit_sha TEXT,
+    pushed     BOOLEAN DEFAULT FALSE,
+    status     TEXT,
+    detail     TEXT
+);
+"""
 
 _OAUTH_SCHEMA = """
 CREATE TABLE IF NOT EXISTS oauth_tokens (
@@ -619,6 +685,28 @@ def log_error(conn: sqlite3.Connection, source: str, message: str,
     )
 
 
+_WEB_COLUMNS: list[tuple[str, str]] = [
+    # Per-image cache buster. Seeded as "2" to match the hand-written global
+    # ?v=2 already deployed, then set to sha256[:8] whenever LENS republishes a
+    # slug with different bytes. Stored per asset rather than global so a single
+    # re-export does not invalidate all 24 images at once.
+    ("cache_bust", "TEXT DEFAULT '2'"),
+    # Perceptual hash of the DEPLOYED jpeg. Lets publish_photos recognise a
+    # photo that is already on the site even when it arrives with a different
+    # Lightroom uuid (a virtual copy, a re-import, a different export of the
+    # same frame) and reuse its slot instead of adding a duplicate.
+    ("phash", "TEXT"),
+]
+
+
+def _migrate_web_columns(conn) -> None:
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(web_assets)")}
+    for name, decl in _WEB_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE web_assets ADD COLUMN {name} {decl}")
+            print(f"[LENS] Added column: web_assets.{name}")
+
+
 def init_db() -> None:
     with get_db() as conn:
         conn.executescript(_SCHEMA)
@@ -629,6 +717,7 @@ def init_db() -> None:
         conn.executescript(_PHASE11_SCHEMA)
         conn.executescript(_OAUTH_SCHEMA)
         conn.executescript(_ERROR_LOG_SCHEMA)
+        conn.executescript(_WEB_SCHEMA)
         _migrate_columns(conn)
         _migrate_crm_columns(conn)
         _migrate_print_columns(conn)
@@ -640,4 +729,5 @@ def init_db() -> None:
         _migrate_social_columns(conn)
         _migrate_calendar_columns(conn)
         _migrate_pipeline_jobs_columns(conn)
+        _migrate_web_columns(conn)
     print(f"[LENS] Database initialized at {_DB_PATH}")

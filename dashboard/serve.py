@@ -11,6 +11,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(DIR), **kwargs)
 
+    def end_headers(self):
+        # Without this, Safari heuristic-caches index.html and keeps serving a
+        # stale (sometimes blank) dashboard even after a service restart. Same
+        # bug that took down the Kitchen Window portal.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        super().end_headers()
+
     def log_message(self, format, *args):
         pass  # suppress access logs
 

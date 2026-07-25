@@ -11,6 +11,7 @@ import cv2
 
 from core.config import settings
 from core.database import get_db
+from lens_core.tz import now_et
 
 _BOUDOIR_PATH = settings.boudoir_private_path
 
@@ -74,7 +75,7 @@ def process_image(image_path: Path) -> dict:
                WHERE id = ?
                """,
             (faces_present, face_count, identifiable,
-             privacy_folder, datetime.utcnow().isoformat(), image_id),
+             privacy_folder, now_et().isoformat(), image_id),
         )
         if final_path != image_path:
             conn.execute(

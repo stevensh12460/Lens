@@ -15,6 +15,7 @@ from typing import Optional
 import exifread
 
 from core.database import get_db
+from lens_core.tz import now_et
 
 logger = logging.getLogger("lens.pass0")
 
@@ -355,7 +356,7 @@ def process_batch(image_paths: list[Path]) -> int:
                 update_fields["time_of_day"] = get_time_of_day(fallback_dt.hour)
             except Exception:
                 # Last resort: use current time so we don't retry indefinitely
-                now = datetime.now()
+                now = now_et()
                 update_fields["captured_at"] = now.isoformat()
                 update_fields["season"] = get_season(now.month)
                 update_fields["time_of_day"] = get_time_of_day(now.hour)

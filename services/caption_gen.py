@@ -229,21 +229,30 @@ def _rich_context(image: dict) -> str | None:
     genre = image.get("genre") or "portrait"
     mood = image.get("mood") or "natural"
 
-    # Parse and scrub seed phrases (each phrase scrubbed individually so the
-    # whole array isn't lost when one phrase contains "stillness").
-    seed_raw = image.get("caption_seed_phrases") or ""
-    phrases_list: list[str] = []
-    try:
-        if seed_raw.startswith("["):
-            arr = json.loads(seed_raw)
-            if isinstance(arr, list):
-                phrases_list = [str(p) for p in arr]
-        elif seed_raw:
-            phrases_list = [seed_raw]
-    except (json.JSONDecodeError, TypeError):
-        phrases_list = [seed_raw] if seed_raw else []
-    phrases_list = [s for s in (_scrub(p) for p in phrases_list) if s]
-    phrases = " | ".join(phrases_list[:3])
+    def _to_list(raw) -> list[str]:
+        if not raw:
+            return []
+        try:
+            if isinstance(raw, str) and raw.startswith("["):
+                arr = json.loads(raw)
+                if isinstance(arr, list):
+                    return [str(p) for p in arr]
+            return [str(raw)]
+        except (json.JSONDecodeError, TypeError):
+            return [str(raw)]
+
+    # Parse + scrub each enrichment field individually so one cliché doesn't
+    # nuke the whole list.
+    phrases_list = [s for s in (_scrub(p) for p in _to_list(image.get("caption_seed_phrases"))) if s]
+    phrases = " | ".join(phrases_list[:5])
+
+    textures_list = [s for s in (_scrub(t) for t in _to_list(image.get("texture_vocabulary"))) if s]
+    textures = ", ".join(textures_list[:5])
+
+    verbs_list = [s for s in (_scrub(v) for v in _to_list(image.get("verb_seeds"))) if s]
+    verbs = ", ".join(verbs_list[:5])
+
+    tension = _scrub(image.get("visual_tension"))
 
     # If after scrubbing the hook is empty, fall back to lean context — better
     # to show no narrative seed than a stripped, garbled fragment.
@@ -257,8 +266,14 @@ def _rich_context(image: dict) -> str | None:
         ctx += f"\n- Eye lands on first: {dominant}"
     if emotion_target:
         ctx += f"\n- Image evokes (a fact, not a directive): {emotion_target}"
+    if tension:
+        ctx += f"\n- Productive contradiction in the frame: {tension}"
+    if textures:
+        ctx += f"\n- Texture words present in the scene: {textures}"
+    if verbs:
+        ctx += f"\n- Active verbs/gerunds you may use: {verbs}"
     if phrases:
-        ctx += f"\n- Sense words present in the scene: {phrases}"
+        ctx += f"\n- Sense phrases present in the scene: {phrases}"
 
     return ctx
 
@@ -417,6 +432,7 @@ async def generate_caption(image_id: int, style: str = "instagram") -> dict:
                       description, composition, subjects, emotional_impact, print_notes,
                       narrative_hook, caption_seed_phrases, recommended_caption_tone,
                       recommended_pillar, dominant_visual_element, viewer_emotion_target,
+                      texture_vocabulary, verb_seeds, visual_tension,
                       user_context
                FROM images WHERE id = ?""",
             (image_id,),

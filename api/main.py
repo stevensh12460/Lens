@@ -9,7 +9,7 @@ from core.config import settings
 from core.database import init_db
 from core.ollama import ollama
 from api.models import HealthResponse
-from api.routes import pipeline, portfolio, social, crm, inspiration, intelligence, lightroom, shoots, content, print as print_routes, settings as settings_routes
+from api.routes import pipeline, portfolio, social, crm, inspiration, intelligence, lightroom, shoots, content, print as print_routes, settings as settings_routes, web
 from api.routes.intelligence import images_router
 from api.routes import sd_import
 
@@ -36,6 +36,7 @@ app.include_router(crm.router, prefix="/crm", tags=["crm"])
 app.include_router(inspiration.router, prefix="/inspiration", tags=["inspiration"])
 app.include_router(intelligence.router, prefix="/intelligence", tags=["intelligence"])
 app.include_router(lightroom.router, prefix="/lightroom", tags=["lightroom"])
+app.include_router(web.router,       prefix="/web",       tags=["web"])
 app.include_router(shoots.router, prefix="/shoots", tags=["shoots"])
 app.include_router(content.router, prefix="/api/v1/content", tags=["content"])
 app.include_router(print_routes.router, prefix="/api/v1/print", tags=["print"])

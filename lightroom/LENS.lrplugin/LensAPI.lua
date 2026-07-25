@@ -89,6 +89,15 @@ function LensAPI.post(endpoint, body)
         { field = "Accept",       value = "application/json" },
     })
     if result then
+        -- LrHttp returns the body for 4xx/5xx exactly as for 200, and
+        -- jsonDecode sets _ok=true on any input at all — so without this an
+        -- error page reads as success. Publishing must never mistake a failure
+        -- for a completed publish.
+        local status = headers and tonumber(headers.status) or nil
+        if status ~= nil and status ~= 200 then
+            return nil, string.format("HTTP %d from %s: %s",
+                status, endpoint, tostring(result):sub(1, 200))
+        end
         local decoded = jsonDecode(result)
         return decoded
     else
@@ -109,6 +118,34 @@ function LensAPI.get(endpoint)
     end
     return nil
 end
+
+-- ---------------------------------------------------------------------------
+-- Status-aware POST.
+--
+-- LrHttp.post returns the response BODY for 4xx and 5xx just as it does for
+-- 200, and jsonDecode above sets `_ok = true` on literally any input — so a
+-- FastAPI 422 validation body or a 500 HTML error page both read as success.
+-- For the read-only sync paths that was cosmetic. For publishing it is not:
+-- Lightroom would record a slug LENS never allocated and permanently believe a
+-- photo is live on a site that has never seen it.
+--
+-- Returns (body, status). status is a number, or nil if the request never
+-- completed at all (LENS down). Callers must check it.
+-- ---------------------------------------------------------------------------
+function LensAPI.postRaw(endpoint, body, accept)
+    local url = BASE_URL .. endpoint
+    local result, hdrs = LrHttp.post(url, jsonEncode(body), {
+        { field = "Content-Type", value = "application/json" },
+        { field = "Accept",       value = accept or "application/json" },
+    })
+    if not result then return nil, nil end
+    local status = hdrs and tonumber(hdrs.status) or nil
+    return result, status
+end
+
+-- LensAPI.postTSV is defined further down, immediately after parseTSV.
+-- It cannot live here: parseTSV is a `local` declared later in the file, so a
+-- closure created at this point would capture the global (nil) instead.
 
 -- ---------------------------------------------------------------------------
 -- Build helpers
@@ -166,6 +203,107 @@ end
 
 function LensAPI.getUnsynced()
     return LensAPI.get("/lightroom/unsynced")
+end
+
+-- ---------------------------------------------------------------------------
+-- Results: LENS -> Lightroom
+--
+-- These use the API's tab-separated representation rather than JSON. The
+-- jsonDecode above is a flat key/value scraper: it cannot represent an array
+-- of objects, so an array response would silently collapse into one row and we
+-- would write the same values onto every photo. Parsing TSV is a few lines we
+-- can fully reason about. (The API still serves JSON for other clients.)
+-- ---------------------------------------------------------------------------
+local function splitTabs(line)
+    local cols, start = {}, 1
+    while true do
+        local tabPos = line:find("\t", start, true)
+        if tabPos then
+            table.insert(cols, line:sub(start, tabPos - 1))
+            start = tabPos + 1
+        else
+            table.insert(cols, line:sub(start))
+            break
+        end
+    end
+    return cols
+end
+
+local function parseTSV(text)
+    local rows = {}
+    if not text or text == "" then return rows end
+    local isHeader = true
+    for line in text:gmatch("[^\r\n]+") do
+        if isHeader then
+            isHeader = false
+        else
+            local cols = splitTabs(line)
+            if cols[1] and cols[1] ~= "" then
+                table.insert(rows, {
+                    file_path  = cols[1],
+                    lens_score = cols[2] or "",
+                    tier       = cols[3] or "",
+                    status     = cols[4] or "",
+                    note       = cols[5] or "",
+                    weakness   = cols[6] or "",
+                })
+            end
+        end
+    end
+    return rows
+end
+
+-- POST expecting a TSV body whose FIRST line is the literal sentinel "#OK".
+-- Requiring the sentinel means a proxy error page, an HTML 500, or a truncated
+-- response can never be mistaken for a valid empty result set.
+-- Returns (rows, nil) on success, or (nil, errorMessage) on any failure.
+-- Used by the publish service; the older results endpoints predate the
+-- sentinel and are status-checked without it.
+function LensAPI.postTSV(endpoint, body)
+    local result, status = LensAPI.postRaw(endpoint, body, "text/plain")
+    if result == nil then
+        return nil, "LENS unreachable on port 8600 (is it running?)"
+    end
+    -- status may be nil if this SDK build does not surface it on the header
+    -- table; in that case the #OK sentinel below is the guard that matters, so
+    -- treat only an explicit non-200 as fatal here.
+    if status ~= nil and status ~= 200 then
+        return nil, string.format("LENS returned HTTP %s: %s",
+            tostring(status), tostring(result):sub(1, 300))
+    end
+    local firstLine = result:match("^[^\r\n]*") or ""
+    if firstLine ~= "#OK" then
+        return nil, "LENS response missing #OK sentinel: " ..
+            tostring(result):sub(1, 300)
+    end
+    -- Drop the sentinel line; parseTSV then skips the column header as usual.
+    local rest = result:gsub("^[^\r\n]*\r?\n", "", 1)
+    return parseTSV(rest), nil
+end
+
+-- Returns an array of result rows for the given photos, or nil if LENS is
+-- unreachable (nil and empty-table mean different things to the caller).
+function LensAPI.getResultsForPhotos(photos)
+    local paths = {}
+    for _, photo in ipairs(photos) do
+        local p = photo:getRawMetadata("path")
+        if p then table.insert(paths, p) end
+    end
+    if #paths == 0 then return {} end
+
+    local url          = BASE_URL .. "/lightroom/results/by-paths?format=tsv"
+    local body         = jsonEncode({ paths = paths })
+    local result, hdrs = LrHttp.post(url, body, {
+        { field = "Content-Type", value = "application/json" },
+        { field = "Accept",       value = "text/plain" },
+    })
+    if not result then return nil end
+    -- A 4xx/5xx still returns a body. Without this check an error page would be
+    -- fed to parseTSV, yield zero rows, and be reported to the user as "these
+    -- photos are not known to LENS" — a wrong answer that looks like a real one.
+    local status = hdrs and tonumber(hdrs.status) or nil
+    if status ~= nil and status ~= 200 then return nil end
+    return parseTSV(result)
 end
 
 return LensAPI

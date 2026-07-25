@@ -24,13 +24,31 @@ def get_preprocessed_path(source_path: Path) -> Path:
     return _CACHE_DIR / (f"{source_path.stem}_{dir_hash}_prep.jpg")
 
 
+def _open_raw_preview(source_path: Path) -> "Image.Image":
+    """Embedded JPEG preview from a RAW whose sensor data is damaged.
+
+    Older CR2/ARW files can rot in the raw payload while the full-resolution
+    preview stays intact. Scoring the preview beats losing the photo.
+    """
+    import io
+    import rawpy
+    with rawpy.imread(str(source_path)) as raw:
+        thumb = raw.extract_thumb()
+    if thumb.format == rawpy.ThumbFormat.JPEG:
+        return Image.open(io.BytesIO(thumb.data)).convert("RGB")
+    return Image.fromarray(thumb.data).convert("RGB")
+
+
 def _open_image(source_path: Path) -> Image.Image:
     """Open any image including RAW formats, return a PIL Image."""
     if source_path.suffix.lower() in _RAW_EXTENSIONS:
         import rawpy
-        with rawpy.imread(str(source_path)) as raw:
-            rgb = raw.postprocess(use_camera_wb=True, half_size=True, no_auto_bright=False, output_bps=8)
-        return Image.fromarray(rgb)
+        try:
+            with rawpy.imread(str(source_path)) as raw:
+                rgb = raw.postprocess(use_camera_wb=True, half_size=True, no_auto_bright=False, output_bps=8)
+            return Image.fromarray(rgb)
+        except Exception:
+            return _open_raw_preview(source_path)
     return Image.open(source_path)
 
 

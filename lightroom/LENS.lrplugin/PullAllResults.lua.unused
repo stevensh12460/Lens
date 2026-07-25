@@ -1,0 +1,215 @@
+--[[
+    PullAllResults.lua — pulls LENS results for the whole catalog, or a timed
+    sample, so you can measure throughput before committing to a full run.
+
+    Same authority rule as PullResults.lua: writes ONLY plugin custom metadata
+    and the removable "LENS" keyword branch. Never rating, pick, or label.
+
+    Same yield rules (an earlier version tripped both):
+      * Progress updates NEVER inside a withWriteAccessDo block.
+      * LrTasks.pcall, never bare pcall, around anything that yields
+        (Lua 5.1 cannot yield across a C-call boundary).
+
+    Work is done in two chunk sizes:
+      FETCH_CHUNK — paths per HTTP request, so we never build one giant POST
+                    or hold the whole catalog's results in memory.
+      WRITE_CHUNK — photos per catalog write transaction.
+--]]
+
+local LrApplication     = import "LrApplication"
+local LrDialogs         = import "LrDialogs"
+local LrFunctionContext = import "LrFunctionContext"
+local LrProgressScope   = import "LrProgressScope"
+local LrTasks           = import "LrTasks"
+local LensAPI           = require "LensAPI"
+
+local FETCH_CHUNK = 500
+local WRITE_CHUNK = 100
+local SAMPLE_SIZE = 1000
+
+local TIERS    = { "Exceptional", "Strong", "Solid", "Weak", "Cull" }
+local STATUSES = { "Posted", "Print", "Portfolio", "Ready", "Scored",
+                   "Duplicate", "Culled" }
+
+-- NOTE: Lightroom runs Lua 5.1. No floor-division operator (//), no goto, no
+-- bitwise ops, no utf8 library. Using any of them is a syntax error, and the
+-- symptom is Lightroom reporting "No script by the name <file>.lua" because
+-- the script never compiles.
+local function fmtDuration(sec)
+    if sec < 60 then return string.format("%d sec", sec) end
+    if sec < 3600 then
+        return string.format("%d min %d sec", math.floor(sec / 60), sec % 60)
+    end
+    return string.format("%.1f hours", sec / 3600)
+end
+
+LrTasks.startAsyncTask(function()
+    LrFunctionContext.callWithContext("PullAllLensResults", function(context)
+
+        local catalog = LrApplication.activeCatalog()
+        local all     = catalog:getAllPhotos()
+        local total   = #all
+
+        if total == 0 then
+            LrDialogs.message("LENS", "Catalog is empty.")
+            return
+        end
+
+        -- ------------------------------------------------------------------
+        -- Choose scope.
+        -- ------------------------------------------------------------------
+        local choice = LrDialogs.confirm(
+            "Pull LENS Results",
+            string.format(
+                "Your catalog has %d photos.\n\n" ..
+                "Run a timing test on the first %d to measure speed, or " ..
+                "process the entire catalog?\n\n" ..
+                "You can cancel a run at any time from the progress bar.",
+                total, SAMPLE_SIZE),
+            "Test " .. SAMPLE_SIZE,   -- returns "ok"
+            "Cancel",                 -- returns "cancel"
+            "Process All")            -- returns "other"
+
+        local limit
+        if choice == "ok" then
+            limit = math.min(SAMPLE_SIZE, total)
+        elseif choice == "other" then
+            limit = total
+        else
+            return
+        end
+
+        local startTime = os.time()
+
+        local progress = LrProgressScope({
+            title           = string.format("LENS: processing %d photos...", limit),
+            functionContext = context,
+        })
+
+        -- ------------------------------------------------------------------
+        -- Keyword hierarchy, created once. Non-fatal if it fails.
+        -- ------------------------------------------------------------------
+        local tierKw, statusKw = {}, {}
+        local keywordsOk = LrTasks.pcall(function()
+            catalog:withWriteAccessDo("LENS keywords", function()
+                local lensRoot   = catalog:createKeyword("LENS",   {}, false, nil,      true)
+                local tierRoot   = catalog:createKeyword("Tier",   {}, false, lensRoot, true)
+                local statusRoot = catalog:createKeyword("Status", {}, false, lensRoot, true)
+                for _, t in ipairs(TIERS)    do tierKw[t]   = catalog:createKeyword(t, {}, false, tierRoot,   true) end
+                for _, s in ipairs(STATUSES) do statusKw[s] = catalog:createKeyword(s, {}, false, statusRoot, true) end
+            end)
+        end)
+
+        -- ------------------------------------------------------------------
+        -- Main loop: fetch a chunk, write it, advance. Progress between only.
+        -- ------------------------------------------------------------------
+        local written, noScore, missing, unreachable = 0, 0, 0, 0
+        local stamp     = os.date("%Y-%m-%d %H:%M")
+        local lastError = nil
+        local index     = 1
+
+        while index <= limit do
+            if progress:isCanceled() then break end
+            progress:setPortionComplete(index, limit)
+
+            local fetchStop   = math.min(index + FETCH_CHUNK - 1, limit)
+            local chunkPhotos = {}
+            for j = index, fetchStop do
+                table.insert(chunkPhotos, all[j])
+            end
+
+            -- Fetch (yields on the network, so LrTasks.pcall).
+            local okFetch, results = LrTasks.pcall(function()
+                return LensAPI.getResultsForPhotos(chunkPhotos)
+            end)
+
+            if not okFetch then
+                lastError = tostring(results)
+                break
+            end
+
+            if results == nil then
+                unreachable = unreachable + #chunkPhotos
+            else
+                local byPath = {}
+                for _, r in ipairs(results) do byPath[r.file_path] = r end
+
+                -- Write this fetch-chunk in smaller transactions.
+                local w = 1
+                while w <= #chunkPhotos do
+                    local wStop = math.min(w + WRITE_CHUNK - 1, #chunkPhotos)
+
+                    local okWrite, err = LrTasks.pcall(function()
+                        catalog:withWriteAccessDo("Pull LENS Results", function()
+                            for k = w, wStop do
+                                local photo = chunkPhotos[k]
+                                local path  = photo:getRawMetadata("path")
+                                local r     = path and byPath[path] or nil
+
+                                if r then
+                                    photo:setPropertyForPlugin(_PLUGIN, "lensScore",    r.lens_score or "")
+                                    photo:setPropertyForPlugin(_PLUGIN, "lensTier",     r.tier       or "")
+                                    photo:setPropertyForPlugin(_PLUGIN, "lensStatus",   r.status     or "")
+                                    photo:setPropertyForPlugin(_PLUGIN, "lensNote",     r.note       or "")
+                                    photo:setPropertyForPlugin(_PLUGIN, "lensSyncedAt", stamp)
+                                    written = written + 1
+                                    if (r.lens_score or "") == "" then noScore = noScore + 1 end
+
+                                    if keywordsOk then
+                                        local tk = r.tier   and tierKw[r.tier]
+                                        local sk = r.status and statusKw[r.status]
+                                        if tk then photo:addKeyword(tk) end
+                                        if sk then photo:addKeyword(sk) end
+                                    end
+                                else
+                                    missing = missing + 1
+                                end
+                            end
+                        end)
+                    end)
+
+                    if not okWrite then
+                        lastError = tostring(err)
+                        break
+                    end
+                    w = wStop + 1
+                end
+            end
+
+            if lastError then break end
+            index = fetchStop + 1
+        end
+
+        progress:done()
+
+        -- ------------------------------------------------------------------
+        -- Report, with a projection for the full catalog.
+        -- ------------------------------------------------------------------
+        local elapsed   = math.max(os.time() - startTime, 1)
+        local processed = index - 1
+        local rate      = processed / elapsed
+
+        local msg = string.format(
+            "Processed %d photos in %s  (%.1f photos/sec)\n\n" ..
+            "%d written\n%d unscored (duplicates/culled)\n%d not known to LENS\n",
+            processed, fmtDuration(elapsed), rate, written, noScore, missing)
+
+        if unreachable > 0 then
+            msg = msg .. string.format("%d skipped, LENS API unreachable\n", unreachable)
+        end
+
+        if processed < total and rate > 0 then
+            msg = msg .. string.format(
+                "\nProjected for all %d photos: about %s.",
+                total, fmtDuration(math.floor(total / rate)))
+        end
+
+        if lastError then
+            msg = msg .. "\n\nStopped early on error:\n" .. lastError
+        end
+
+        msg = msg .. "\n\nYour star ratings, pick flags and color labels were not touched."
+
+        LrDialogs.message("LENS — Pull Results", msg)
+    end)
+end)

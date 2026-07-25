@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.database import get_db
+from lens_core.tz import now_et
 
 logger = logging.getLogger("lens.nightly_report")
 
@@ -41,8 +42,8 @@ def generate_report() -> dict:
     Compute stats for the last 8 hours and return a report dict.
     """
     _ensure_table()
-    cutoff = (datetime.utcnow() - timedelta(hours=8)).isoformat()
-    now_iso = datetime.utcnow().isoformat()
+    cutoff = (now_et() - timedelta(hours=8)).isoformat()
+    now_iso = now_et().isoformat()
 
     with get_db() as conn:
         # Images processed in the last 8 hours (pass3 completed)

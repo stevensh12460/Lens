@@ -11,7 +11,7 @@ Fully local photography business OS running on Steven's Mac Studio M1 Max (32 GB
 - **API**: FastAPI at `http://localhost:8600`
 - **Dashboard**: Static HTML at `http://localhost:8800`
 - **Ollama**: `http://localhost:11434`
-- **Database**: `/Volumes/8TB/claudes selects/lens/data/lens.db` (SQLite WAL)
+- **Database**: `/Users/stevenhoward/lens/data/lens.db` (SQLite WAL) — this is the LIVE db, and it is what `.env` `LENS_DB_PATH` points at. The `/Volumes/8TB/claudes selects/lens/data/lens.db` path referenced in older docs/snippets is a **stale April copy**; do not read or write it.
 - **Code**: `/Users/stevenhoward/lens/`
 - **Venv**: `/Users/stevenhoward/lens/venv/` (Python 3.11)
 - **Model weights**: `~/lens/models/` (LAION MLP) + `~/.cache/` (NIMA, CLIP auto-cached)
@@ -455,9 +455,113 @@ GET  /api/v1/images/{id}/thumb        # Thumbnail (800px, handles RAW via rawpy)
 
 GET  /crm/clients                     # Client list
 GET  /crm/bookings                    # Booking list
+
+# Lightroom (two-way)
+POST /lightroom/sync-ratings          # LR -> LENS: stars/picks/labels/keywords (batch)
+GET  /lightroom/picks                 # Picks, COALESCE over new+legacy columns
+GET  /lightroom/results               # LENS -> LR: score/tier/status/note (?format=tsv)
+POST /lightroom/results/by-paths      # Same, for an explicit path list (?format=tsv)
 ```
 
 ---
+
+## Lightroom Integration (Lightroom is the helm)
+
+The working model: **Steven works in Lightroom. LENS is the backend brain.** LENS
+pushes its judgement down into Lightroom so the library sorts itself, instead of
+making him leave Lightroom to read a dashboard.
+
+### Direction 1 — LR to LENS (his judgement wins)
+Plugin menu: **Sync All Ratings to LENS** / **Sync Selected to LENS**.
+Writes `lr_rating`, `lr_pick`, `lr_color_label`, `lr_keywords`, recomputes
+`trust_score`, auto-promotes `portfolio_worthy` at 4+ stars, and marks rejects
+as `pass1_status='fail'`. `pipeline/priority_queue.py` puts every
+`lr_pick='pick'` image at Priority 2, ahead of machine-scored images.
+
+**His stars are ground truth.** LENS ranks within his picks; it never overrides
+a photo he has rated.
+
+### Direction 2 — LENS to LR (new)
+Plugin menu: **Pull LENS Results for Selected**.
+Writes plugin custom metadata (`lensScore`, `lensTier`, `lensStatus`, `lensNote`,
+`lensSyncedAt`) plus a single removable `LENS > Tier > …` / `LENS > Status > …`
+keyword branch. It writes **nothing else** — never rating, pickStatus, or
+colorNameForLabel.
+
+**Tier bands are PERCENTILE-ANCHORED, not the theoretical 0-10 range** (see
+`_TIER_BANDS` in `api/routes/lightroom.py`): Exceptional >=6.68 (top 1%),
+Strong >=6.52 (top 5%), Solid >=6.22 (top 25%), Weak >=5.99 (top 50%),
+Low below that. Measured reality across 171,419 scored images: min 4.59, max
+7.33, mean 6.00. The old bands (Exceptional 7.5+, Cull <4.5) sat OUTSIDE the
+real range, so two of five tiers could never match a single photo. Do not
+"restore" them.
+
+Status `Scored` means the image genuinely has a score. Images LENS has never
+analysed report `Pending` — these were previously mislabelled Scored, which
+made any collection built on it untrustworthy.
+
+**Why TSV:** the plugin consumes `?format=tsv`, not JSON. The plugin's Lua
+`jsonDecode` is a flat key/value scraper that cannot represent an array of
+objects (it would collapse every row into one and write identical values to
+every photo). TSV keeps the Lua parse to a few verifiable lines. JSON is still
+served for the dashboard and MCP clients.
+
+### Smart Collections (where the payoff actually shows up)
+Because the custom fields are searchable, build these once in Lightroom and the
+library self-organises:
+- **LENS: Top Tier** — `lensTier` contains `Exceptional`
+- **LENS: Ready to Post** — `lensStatus` contains `Ready`
+- **LENS: Print Candidates** — `lensStatus` contains `Print`
+- **LENS: Strong + Unrated** — `lensTier` contains `Strong` AND rating is 0
+
+### Rollback
+Delete the top-level `LENS` keyword (takes the whole branch) and disable the
+plugin. The catalog is left clean.
+
+---
+
+### LENS Weakness field (added 2026-07-24)
+
+`lensWeakness` is the single worst composition sub-score for a photo, and only
+when that score is below 5.0. It replaces `lensNote` as the editing queue:
+notes were 97.4% the identical string "Crop to golden ratio", which sorts
+nothing. Weakness actually partitions the library.
+
+Source: `composition_sub` JSON. Dimensions considered:
+thirds, golden_ratio, harmony, balance, visual_weight, face_placement, dof.
+**`symmetry` is deliberately excluded** — it is the weakest dimension on 76.6%
+of images, but a non-symmetric photo is not a defective photo. Including it
+made the field meaningless.
+
+Live distribution: dof 49,835 / face_placement 8,177 / balance 257 /
+visual_weight 4 / golden_ratio 2. 58,275 images carry a real weakness;
+112,973 scored images have no dimension below the floor and get an empty value.
+
+Smart Collection: `LENS Weakness` = `dof` is a real "soft focus, check before
+you edit" queue.
+
+### pass1_status = 'missing' (added 2026-07-24)
+
+45,382 rows pointed at files that no longer exist — they moved when the
+/Volumes/8TB folders were reorganized. They were sitting in the queue as
+`pass1_status IS NULL`, indistinguishable from real work, and inflated the
+Lightroom "Pending" bucket to 45,529.
+
+Verified before writing: **zero** of them had `nima_composite`, `pass2_at`, or
+`pass3_at` set, so no analysis was lost. Nothing on disk was touched; this is a
+status column update only. Rollback list of image ids:
+`data/rollback_mark_missing_2026-07-24.json`.
+
+`missing` is terminal — added to the terminal-state lists in
+`pipeline/queue_manager.py` (3 sites) and `api/routes/pipeline.py` (1 site) so
+dashboard counts reconcile and the job picker skips them.
+
+**Do not remap these by filename.** Sony recycles filenames: `DSC03430.ARW`
+exists in 3+ different folders. A filename match would attach one folder's
+scores to another folder's photo.
+
+After the sweep the real backlog was 766 files (mostly /Volumes/8TB/new post
+and /Volumes/Storage/adobe dump), which were queued for pass1.
 
 ## Database Schema
 
@@ -659,3 +763,45 @@ Supported extensions: .jpg .jpeg .png .tif .tiff .cr2 .cr3 .nef .arw .raf .dng .
 - **Error handling system**: Heartbeat threads (30s updates), `error_log` table, health endpoint (green/yellow/red), dashboard health bar + error log panel, startup recovery logging, stuck job detection using heartbeat-aware watchdog (5min heartbeat timeout vs 15min legacy), worker_id tracking on jobs, per-error resolve/resolve-all via API and dashboard.
 - **Pass3 floor raised to 6.0**: Images below 6.0 composite never auto-promoted to pass3. Viewable in Images tab "Pass3 Skipped" filter with "Rescue → P3" button for manual override.
 - **Dashboard clock fixed**: Top-right corner now shows live ticking clock in Eastern time (was broken/stale).
+
+
+### Corrupt RAW recovery + terminal statuses (2026-07-24)
+
+**Embedded-preview fallback.** Some older CR2/ARW files have rotted sensor
+payloads — LibRaw reports `data corrupted at <offset>` — while still holding an
+intact full-resolution embedded JPEG. All three raw loaders
+(`pipeline/pass1_cull.py`, `pass2_nima.py`, `preprocessor.py`) now fall back to
+`raw.extract_thumb()` instead of discarding the photo. **185 of 210 photos
+recovered** at full 5760x3840. Do not remove this fallback.
+
+**Data-integrity finding — his archive has genuinely damaged files.** 28 files
+are unreadable by any decoder. 16 of 20 full-size raws had *scrambled headers*:
+random bytes or all-zeros where the TIFF magic `II*\0` belongs. 7 files are
+literally 0 bytes. This is silent bit-rot / bad copies on /Volumes/Storage, not
+a LENS limitation. They should be re-sourced from another backup if one exists.
+
+**New terminal pass1_status values** (all added to the terminal lists in
+`pipeline/queue_manager.py` (3 sites) and `api/routes/pipeline.py` (1 site),
+and mapped in `_status_for` for Lightroom):
+
+| status | meaning | count |
+|---|---|---:|
+| `missing` | file no longer on disk | 45,382 |
+| `sidecar` | macOS `._*` AppleDouble, not a photograph | 50 |
+| `corrupt` | on disk, no decoder can read it | 28 |
+| `video`   | `.mp4` — does not belong in an image pipeline | 6 |
+
+Gotcha: the job picker in `queue_manager.py` excludes `._*` by filename, so
+requeuing AppleDouble rows creates jobs that can never drain. Mark them
+`sidecar`, don't queue them.
+
+### Eastern Time swept catalog-wide (2026-07-24)
+
+`lens_core.tz.now_et()` already existed but the pipeline never imported it.
+**21 sites** across 10 files were still writing `datetime.utcnow()` or naive
+`datetime.now()`: pass1_cull, pass2_nima, pass3_tag, queue_manager,
+privacy_filter, pass0_metadata, sd_importer, nightly_report, api/routes/social,
+api/routes/pipeline. All now use `now_et()`.
+
+Caveat: rows written before this date still hold UTC strings, so timestamps
+straddle a 4-hour seam at 2026-07-24. Historical rows were NOT rewritten.

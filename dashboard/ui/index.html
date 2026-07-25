@@ -2359,16 +2359,19 @@ function _postCardHtml(p) {
 function renderScheduleDay(data) {
   // data could be day-view or we re-fetch
   let morning = [], evening = [], unslotted = [];
+  let resolvedDate = '';
   if (data.view === 'day') {
     morning = data.morning || [];
     evening = data.evening || [];
     unslotted = data.unslotted || [];
+    resolvedDate = data.date;
     const d = new Date(data.date + 'T12:00:00');
     $('cal-today-label').textContent = d.toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'long', day:'numeric'});
   } else if (data.view === 'week') {
     // Pick the selected date or today from week data
     const dateVal = $('cal-date-picker') ? $('cal-date-picker').value : '';
     const targetDate = dateVal || new Date().toISOString().slice(0, 10);
+    resolvedDate = targetDate;
     const dayData = data.days[targetDate];
     if (dayData) {
       morning = dayData.morning || [];
@@ -2379,13 +2382,39 @@ function renderScheduleDay(data) {
     $('cal-today-label').textContent = d.toLocaleDateString(undefined, {weekday:'long', year:'numeric', month:'long', day:'numeric'});
   }
 
+  // Day-view slot rendering. Empty slots are armable (click → selectCandidateSlot)
+  // exactly like the week grid, so "pick a photo for the day" works here too —
+  // previously only the week view wired this, so the default Day view looked
+  // broken in Edit Mode.
+  const _emptySlotHtml = (slot) => `
+    <div class="empty-state cal-day-empty-slot" data-slot="${slot}"
+         style="padding:14px 12px;cursor:pointer;border:1px dashed #334155;border-radius:6px;text-align:center"
+         onclick="selectCandidateSlot(null,'${resolvedDate}','${slot}',this)"
+         title="Click to arm this slot, then pick a photo from the pool below">
+      <div style="color:#64748b;font-size:12px">No ${slot} post</div>
+      <div style="color:#3b82f6;font-size:10px;margin-top:4px">+ Click to add a photo</div>
+    </div>`;
+
+  // For a filled slot, prepend a small arm bar so the pool can swap its image.
+  const _slotArmBar = (posts, slot) => {
+    if (!posts.length) return '';
+    const pid = posts[0].id;
+    return `<div style="margin-bottom:8px">
+      <button class="btn btn-sm" onclick="selectCandidateSlot(${pid},'${resolvedDate}','${slot}',this)"
+              style="font-size:11px;background:#1e1b4b;border-color:#a78bfa;color:#c4b5fd"
+              title="Arm this slot, then click a photo in the pool to swap its image">
+        ↪ Swap photo from pool
+      </button>
+    </div>`;
+  };
+
   $('cal-day-morning').innerHTML = morning.length
-    ? morning.map(p => _postCardHtml(p)).join('')
-    : '<div class="empty-state" style="padding:12px 0">No morning post</div>';
+    ? _slotArmBar(morning, 'morning') + morning.map(p => _postCardHtml(p)).join('')
+    : _emptySlotHtml('morning');
 
   $('cal-day-evening').innerHTML = evening.length
-    ? evening.map(p => _postCardHtml(p)).join('')
-    : '<div class="empty-state" style="padding:12px 0">No evening post</div>';
+    ? _slotArmBar(evening, 'evening') + evening.map(p => _postCardHtml(p)).join('')
+    : _emptySlotHtml('evening');
 
   // Next 3 days preview
   const upcoming = $('cal-upcoming-3');
@@ -3712,9 +3741,24 @@ async function pickCandidate(id) {
   openSchedModal(id);
 }
 
-function openSchedModal(id) {
-  const img = _pcCandidates.find(x => x.id === id);
-  if (!img) { alert('Image not found in current pool — refresh.'); return; }
+async function openSchedModal(id) {
+  // Try the loaded pool first (fast path). If the image isn't there — e.g. it
+  // was opened from a calendar post, a different filter, or before the pool
+  // loaded — fetch its detail instead of dead-ending with an alert. This was
+  // the "can't pick a photo for the day in edit mode" bug: the preview-modal
+  // Schedule button handed an id that wasn't in the filtered _pcCandidates.
+  let img = _pcCandidates.find(x => x.id === id);
+  if (!img) {
+    try {
+      img = await apiFetch(`/social/image-preview/${id}`);
+      // image-preview returns image_id; normalize to id for downstream code.
+      if (img && img.image_id != null && img.id == null) img.id = img.image_id;
+    } catch (e) {
+      alert('Could not load that image to schedule it: ' + ((e && e.message) || e));
+      return;
+    }
+  }
+  if (!img) { alert('Image not found.'); return; }
   _pcCurrent = img;
   document.getElementById('sched-m-title').textContent = `Schedule: ${img.file_name}`;
   document.getElementById('sched-m-sub').textContent =
@@ -4916,38 +4960,72 @@ function _ppRenderVisionPanel(p) {
 function _ppRenderVisionFields(d) {
   // Accepts either a calendar-post payload or a direct vision-analyze response.
   const out = $('pp-vision-output');
-  const hook = d.narrative_hook || '';
-  let seedPhrases = d.caption_seed_phrases || [];
-  if (typeof seedPhrases === 'string') {
-    try { seedPhrases = JSON.parse(seedPhrases); } catch { seedPhrases = []; }
-  }
-  if (!Array.isArray(seedPhrases)) seedPhrases = [];
+  const _arr = (v) => {
+    if (!v) return [];
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') {
+      try { const x = JSON.parse(v); return Array.isArray(x) ? x : []; }
+      catch { return []; }
+    }
+    return [];
+  };
+  const hook       = d.narrative_hook || '';
+  const seeds      = _arr(d.caption_seed_phrases);
+  const textures   = _arr(d.texture_vocabulary);
+  const verbs      = _arr(d.verb_seeds);
+  const tags       = _arr(d.tags);
+  const subjects   = _arr(d.subjects);
+  const tension    = d.visual_tension || '';
+  const tone       = d.recommended_caption_tone || '—';
+  const pillar     = d.recommended_pillar || '—';
+  const dominant   = d.dominant_visual_element || '';
+  const emotion    = d.viewer_emotion_target || '';
+  const desc       = d.description || '';
+  const composition= d.composition || '';
+  const emo        = d.emotional_impact || '';
+  const genre      = d.genre || '';
+  const mood       = d.mood || '';
+  const lighting   = d.lighting || '';
+  const setting    = d.setting || '';
+  const palette    = d.color_palette || '';
 
-  const tone = d.recommended_caption_tone || '—';
-  const pillar = d.recommended_pillar || '—';
-  const dominant = d.dominant_visual_element || '';
-  const emotion = d.viewer_emotion_target || '';
-  const desc = d.description || '';
-  const emo = d.emotional_impact || '';
+  const _chip = (txt, cls = 'gray') => {
+    const colors = {
+      gray:   'background:#1e293b;color:#cbd5e1',
+      accent: 'background:#1e1b4b;color:#c4b5fd',
+      warm:   'background:#3f1d09;color:#f59e0b',
+      teal:   'background:#0f2937;color:#5eead4',
+    };
+    return `<span style="${colors[cls]};padding:2px 8px;border-radius:10px;font-size:11px;margin:2px 3px 2px 0;display:inline-block">${_esc(String(txt))}</span>`;
+  };
+  const _row = (label, content) => content
+    ? `<div style="font-size:11px;display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap"><span style="color:#64748b;min-width:110px;text-transform:uppercase;letter-spacing:0.5px;font-size:10px;padding-top:2px">${label}</span><span style="flex:1">${content}</span></div>`
+    : '';
 
-  const seedChips = seedPhrases.length
-    ? seedPhrases.map(s => `<span style="background:#1e1b4b;color:#c4b5fd;padding:2px 8px;border-radius:10px;font-size:11px">${_esc(String(s))}</span>`).join(' ')
-    : '<span style="color:#64748b;font-style:italic">none</span>';
+  const visualChips = [
+    genre   && _chip(`genre: ${genre}`),
+    mood    && _chip(`mood: ${mood}`),
+    lighting&& _chip(`light: ${lighting}`),
+    setting && _chip(`setting: ${setting}`),
+    palette && _chip(`palette: ${palette}`),
+  ].filter(Boolean).join('');
 
   out.innerHTML = `
     <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
-      ${hook ? `<div style="border-left:2px solid #a78bfa;padding:6px 10px;background:#0f0a1f;font-style:italic;color:#e9d5ff">${_esc(hook)}</div>` : ''}
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-        <span style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Seeds</span>
-        ${seedChips}
-      </div>
-      <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px">
-        <div><span style="color:#64748b">Tone:</span> <span style="color:#a78bfa">${_esc(tone)}</span></div>
-        <div><span style="color:#64748b">Pillar:</span> <span style="color:#a78bfa">${_esc(pillar)}</span></div>
-      </div>
-      ${dominant ? `<div style="font-size:11px"><span style="color:#64748b">Eye lands on:</span> <span style="color:#cbd5e1">${_esc(dominant)}</span></div>` : ''}
-      ${emotion ? `<div style="font-size:11px"><span style="color:#64748b">Viewer should feel:</span> <span style="color:#cbd5e1">${_esc(emotion)}</span></div>` : ''}
-      ${emo ? `<div style="font-size:11px;color:#94a3b8;margin-top:4px"><span style="color:#64748b">Emotional impact:</span> ${_esc(emo)}</div>` : ''}
+      ${hook ? `<div style="border-left:2px solid #a78bfa;padding:6px 10px;background:#0f0a1f;font-style:italic;color:#e9d5ff">"${_esc(hook)}"</div>` : ''}
+      ${tension ? _row('Tension', `<span style="color:#fbbf24;font-style:italic">${_esc(tension)}</span>`) : ''}
+      ${dominant ? _row('Eye lands on', `<span style="color:#cbd5e1">${_esc(dominant)}</span>`) : ''}
+      ${emotion  ? _row('Viewer feels', `<span style="color:#cbd5e1">${_esc(emotion)}</span>`) : ''}
+      ${_row('Tone', _chip(tone, 'accent'))}
+      ${_row('Pillar', _chip(pillar, 'warm'))}
+      ${visualChips ? _row('Visual', visualChips) : ''}
+      ${textures.length ? _row('Textures', textures.map(t => _chip(t, 'teal')).join('')) : ''}
+      ${verbs.length    ? _row('Verbs',    verbs.map(v => _chip(v, 'teal')).join('')) : ''}
+      ${seeds.length    ? _row('Seeds',    seeds.map(s => _chip(s, 'accent')).join('')) : ''}
+      ${subjects.length ? _row('Subjects', subjects.map(s => _chip(s)).join('')) : ''}
+      ${tags.length     ? _row('Tags',     tags.map(t => _chip(t)).join('')) : ''}
+      ${composition ? `<div style="font-size:11px;color:#94a3b8;margin-top:4px"><span style="color:#64748b">Composition:</span> ${_esc(composition)}</div>` : ''}
+      ${emo ? `<div style="font-size:11px;color:#94a3b8"><span style="color:#64748b">Emotional impact:</span> ${_esc(emo)}</div>` : ''}
       ${desc ? `<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#64748b">Full description</summary><div style="margin-top:6px;font-size:11px;color:#cbd5e1;line-height:1.5">${_esc(desc)}</div></details>` : ''}
     </div>
   `;

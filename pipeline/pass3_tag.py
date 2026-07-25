@@ -12,41 +12,52 @@ from core.config import settings
 from core.database import get_db
 from core.ollama import ollama
 from pipeline.preprocessor import preprocess
+from lens_core.tz import now_et
 
 _WORKERS = 3
 
-_TAG_PROMPT = """Analyze this photograph and respond with ONLY a valid JSON object.
-No explanation, no markdown, no code fences. Just the JSON.
+_TAG_PROMPT = """You are a working photographer reviewing your own image for portfolio
++ social use. Look at it the way you would in front of a print: what is actually
+in the frame, what light is doing, where the eye lands, what the image is about.
+
+Respond with ONLY a valid JSON object — no explanation, no markdown, no code fences.
 
 {
   "genre": one of: wedding | portrait | boudoir | commercial | events | nature,
-  "mood": string (e.g. "romantic", "playful", "dramatic", "serene"),
-  "lighting": string (e.g. "golden hour", "overcast", "studio strobe", "window light"),
+  "mood": string. concrete + specific (e.g. "humid afternoon stillness", "post-storm relief"). avoid "serene", "peaceful", "moody".
+  "lighting": string. name the light source AND its direction (e.g. "low east sun, raked across stone", "overcast, soft from camera-left", "single window, warm, behind subject").
   "subject_type": string (e.g. "couple", "solo portrait", "group", "landscape", "product"),
   "faces_present": boolean,
   "face_count": integer,
-  "color_palette": string (e.g. "warm earth tones", "cool blues", "high contrast B&W"),
-  "setting": string (e.g. "outdoor forest", "urban street", "indoor studio", "beach"),
-  "quality_score": float 0.0–10.0 (overall image quality as a photographer would judge),
-  "portfolio_worthy": boolean (would you proudly show this in a professional portfolio?),
-  "content_ready": boolean (is this image good enough to post on social media as-is?),
-  "tags": array of strings (5–10 descriptive tags),
-  "description": string (2-3 sentences describing this photo as a photographer would — what makes it special, the emotion, the moment),
-  "composition": string (dominant compositional technique, e.g. "rule of thirds", "leading lines", "negative space", "symmetry", "foreground framing"),
-  "subjects": array of strings (specific named things visible — animals, flowers, landmarks, objects, e.g. ["oak tree", "spider web", "wedding veil", "tattoo sleeve"]),
-  "print_notes": string or null (if this image would make an exceptional print, explain why in one sentence — otherwise null),
-  "technical_issues": string or null (any technical problems visible — motion blur, chromatic aberration, noise, blown highlights, etc. — otherwise null),
-  "emotional_impact": string (one sentence on the emotional response this image evokes in the viewer),
+  "color_palette": string. 1-3 words (e.g. "amber + char", "wet slate + moss", "high-key on white"). no "warm earth tones".
+  "setting": string. specific (e.g. "north-facing dunes, late afternoon", "second-floor walkup kitchen", "limestone cliff face") — not "outdoors" or "indoors".
+  "quality_score": float 0.0–10.0,
+  "portfolio_worthy": boolean,
+  "content_ready": boolean,
+  "tags": array of 6-10 strings. concrete nouns + materials + textures, no clichés.
+  "subjects": array of strings (specific named things visible — animals, flowers, landmarks, objects),
+  "description": string. 2-3 sentences. what is in the frame. specific, sensory, no fluff. tell me what you see, not what you feel about it.
+  "composition": string. one sentence on framing + light direction + depth (e.g. "centered subject, light raking from left, foreground out of focus, distant ridge anchors the bottom third").
+  "print_notes": string or null. if this would make an exceptional print, ONE specific reason — otherwise null.
+  "technical_issues": string or null. only if visible — motion blur, chromatic aberration, blown highlights, noise. otherwise null.
+  "emotional_impact": string. one sentence. what the viewer feels.
 
-  // Caption-fuel fields — these turn pass3 metadata into directly usable
-  // material for the 32b text caption generator. Keep them tight and specific.
-  "narrative_hook": string (ONE sentence that captures the story-in-a-line of this image. Not a description — a story seed. Example: "A solitary performer reaches into the spotlight as the audience disappears into shadow."),
-  "caption_seed_phrases": array of 2-3 strings (evocative fragments a writer could anchor prose around. Example: ["hush of the second balcony", "weight of waiting", "spotlight as a held breath"]),
+  // Caption-fuel fields — these are what the writer pulls from. Keep them
+  // tight, specific, image-grounded. ABSOLUTELY NO "stillness", "pause",
+  // "embrace", "moment of", "captures the essence of". Concrete, not abstract.
+  "narrative_hook": string. ONE short evocative line, under 12 words. concrete noun + concrete verb. NOT a feeling-word; a thing-doing-something. Example: "Cold rain hammered the slate while the cat watched from the eaves."
+  "caption_seed_phrases": array of 3-5 strings, each 3-7 words. sensory phrases the writer can anchor prose around. NOT abstract. Example: ["wet glint on the stone", "sky going to bruise", "wind that won't sit still"].
+  "texture_vocabulary": array of 3-5 single-word texture words observed in the image. concrete and image-specific. Example: ["char", "glass", "gravel", "wool", "smoke"].
+  "verb_seeds": array of 3-5 active verbs/gerunds the writer can use as the spine of the sentence. NOT generic ("being", "having"). Do NOT use "spill"/"spilling". Example: ["raking", "leaning into", "cresting", "splitting", "guttering"].
+  "visual_tension": string. ONE short phrase naming the productive contradiction in the frame — what makes the image refuse to be flat. Example: "warm light, cold ground" or "stillness mid-action".
   "recommended_caption_tone": one of: observational | lyrical | declarative | confessional | journalistic,
   "recommended_pillar": one of: portfolio | personality | transformation | behind_scenes | storytelling,
-  "dominant_visual_element": string (what the eye lands on first — name it specifically, e.g. "the diagonal slash of red across the shoulder", "the empty chair in the foreground"),
-  "viewer_emotion_target": string (what the viewer should FEEL when they see this — distinct from the image's own mood. Example: "longing", "the pull to slow down", "complicit joy")
-}"""
+  "dominant_visual_element": string. what the eye lands on first — name it specifically (e.g. "the diagonal slash of red across the shoulder", "the empty chair in the foreground").
+  "viewer_emotion_target": string. what the viewer should FEEL — distinct from the image's mood. concrete (e.g. "the pull to drive home faster", "the urge to put a hand on the wall").
+}
+
+Be specific. Avoid: "stillness", "pause", "moment of", "embrace", "captures the
+essence of", "serene", "peaceful", "timeless"."""
 
 
 _PER_FILE_TIMEOUT = 600  # 10 min max per image
@@ -67,6 +78,8 @@ async def _tag_single(image_path: Path, semaphore: asyncio.Semaphore) -> dict:
             tags_json          = json.dumps(result.get("tags", []))
             subjects_json      = json.dumps(result.get("subjects", []))
             seed_phrases_json  = json.dumps(result.get("caption_seed_phrases", []))
+            textures_json      = json.dumps(result.get("texture_vocabulary", []))
+            verbs_json         = json.dumps(result.get("verb_seeds", []))
             color_palette      = result.get("color_palette", "")
 
             with get_db() as conn:
@@ -81,6 +94,7 @@ async def _tag_single(image_path: Path, semaphore: asyncio.Semaphore) -> dict:
                        narrative_hook = ?, caption_seed_phrases = ?,
                        recommended_caption_tone = ?, recommended_pillar = ?,
                        dominant_visual_element = ?, viewer_emotion_target = ?,
+                       texture_vocabulary = ?, verb_seeds = ?, visual_tension = ?,
                        pass3_at = ?, pass3_model = ?
                        WHERE file_path = ?""",
                     (
@@ -108,7 +122,10 @@ async def _tag_single(image_path: Path, semaphore: asyncio.Semaphore) -> dict:
                         result.get("recommended_pillar"),
                         result.get("dominant_visual_element"),
                         result.get("viewer_emotion_target"),
-                        datetime.utcnow().isoformat(),
+                        textures_json,
+                        verbs_json,
+                        result.get("visual_tension"),
+                        now_et().isoformat(),
                         settings.vision_model,
                         str(image_path),
                     ),
