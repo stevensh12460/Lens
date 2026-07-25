@@ -153,30 +153,17 @@ async def _retag_one(image_id: int, semaphore: asyncio.Semaphore) -> dict:
     except Exception as e:
         logger.warning(f"[retag] grid_fit failed for {image_id}: {e}")
 
-    # If genre changed, update any calendar posts using this image
-    # and remove the post if the new genre no longer fits
+    # If genre changed, relabel any calendar posts using this image. Calendar
+    # posts are genre-agnostic — a genre change updates the post's genre but
+    # never deletes it. Previously non-nature/landscape images were auto-dropped
+    # from the calendar, which broke scheduling other content.
     calendar_removed = 0
     if genre_changed:
         with get_db() as conn:
-            # Update genre on calendar posts that reference this image
             conn.execute(
                 "UPDATE calendar_posts SET genre = ? WHERE image_id = ? AND status != 'posted'",
                 (new_genre, image_id),
             )
-            # If the new genre doesn't match safe genres,
-            # remove unposted calendar posts using this image
-            _SAFE_GENRES = {"nature", "landscape"}
-            if new_genre and new_genre not in _SAFE_GENRES:
-                cursor = conn.execute(
-                    "DELETE FROM calendar_posts WHERE image_id = ? AND status NOT IN ('posted', 'scheduled')",
-                    (image_id,),
-                )
-                calendar_removed = cursor.rowcount
-                if calendar_removed:
-                    logger.info(
-                        f"[retag] removed {calendar_removed} calendar post(s) for image {image_id} "
-                        f"— genre changed to '{new_genre}' (not in safe genres)"
-                    )
 
     # Clear retag flag, update social_queue
     with get_db() as conn:

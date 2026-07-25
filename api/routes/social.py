@@ -263,7 +263,7 @@ async def vision_analyze_single(image_id: int, restore_text_model: bool = True):
         )
 
     saved_text_model = settings.text_model
-    started = datetime.utcnow()
+    started = now_et()
 
     try:
         # Free VRAM for the 32b vision model.
@@ -282,6 +282,8 @@ async def vision_analyze_single(image_id: int, restore_text_model: bool = True):
         tags_json         = json.dumps(result.get("tags", []))
         subjects_json     = json.dumps(result.get("subjects", []))
         seed_phrases_json = json.dumps(result.get("caption_seed_phrases", []))
+        textures_json     = json.dumps(result.get("texture_vocabulary", []))
+        verbs_json        = json.dumps(result.get("verb_seeds", []))
 
         with get_db() as conn:
             conn.execute(
@@ -295,6 +297,7 @@ async def vision_analyze_single(image_id: int, restore_text_model: bool = True):
                    narrative_hook = ?, caption_seed_phrases = ?,
                    recommended_caption_tone = ?, recommended_pillar = ?,
                    dominant_visual_element = ?, viewer_emotion_target = ?,
+                   texture_vocabulary = ?, verb_seeds = ?, visual_tension = ?,
                    pass3_at = ?, pass3_model = ?
                    WHERE id = ?""",
                 (
@@ -322,7 +325,10 @@ async def vision_analyze_single(image_id: int, restore_text_model: bool = True):
                     result.get("recommended_pillar"),
                     result.get("dominant_visual_element"),
                     result.get("viewer_emotion_target"),
-                    datetime.utcnow().isoformat(),
+                    textures_json,
+                    verbs_json,
+                    result.get("visual_tension"),
+                    now_et().isoformat(),
                     "qwen2.5vl:32b",
                     image_id,
                 ),
@@ -337,7 +343,7 @@ async def vision_analyze_single(image_id: int, restore_text_model: bool = True):
             except Exception:
                 pass
 
-    elapsed = (datetime.utcnow() - started).total_seconds()
+    elapsed = (now_et() - started).total_seconds()
     return {
         "image_id": image_id,
         "file_name": row["file_name"],
@@ -363,6 +369,9 @@ async def vision_analyze_single(image_id: int, restore_text_model: bool = True):
         "quality_score": result.get("quality_score"),
         "print_notes": result.get("print_notes"),
         "technical_issues": result.get("technical_issues"),
+        "texture_vocabulary": result.get("texture_vocabulary", []),
+        "verb_seeds": result.get("verb_seeds", []),
+        "visual_tension": result.get("visual_tension"),
     }
 
 
@@ -456,6 +465,94 @@ def create_calendar_post(post: CalendarPostCreate):
              post.concept, post.image_id, post.shoot_id),
         )
         return {"id": cursor.lastrowid, "post_date": str(post.post_date), "post_time": slot}
+
+
+# ── Monthly collection sync (Lightroom → planned calendar posts) ──────────────
+
+# Full English month names → number, e.g. "january" → 1. cal_mod.month_name[0] is "".
+_MONTH_NUM = {name.lower(): num for num, name in enumerate(cal_mod.month_name) if name}
+
+
+class MonthSyncRequest(BaseModel):
+    month: str              # e.g. "January 2026" (full month name + 4-digit year)
+    file_paths: list[str]   # absolute master paths, in posting order (index 0 → day 1)
+
+
+def _parse_month(label: str) -> tuple[int, int]:
+    """'January 2026' → (2026, 1). Raises 422 on anything else."""
+    parts = label.strip().split()
+    if len(parts) == 2 and parts[0].lower() in _MONTH_NUM and parts[1].isdigit():
+        return int(parts[1]), _MONTH_NUM[parts[0].lower()]
+    raise HTTPException(
+        status_code=422,
+        detail=f"month must be '<Month> <YYYY>' (e.g. 'January 2026'), got {label!r}",
+    )
+
+
+@router.post("/calendar/sync-month")
+def sync_month(req: MonthSyncRequest):
+    """Turn a Lightroom month collection's ordered photos into planned calendar
+    posts: position N in the list becomes day N of the month, one post per day at
+    the morning slot. Rebuilds only 'planned' rows for the month — already-approved
+    ('scheduled') and 'posted' days are left untouched, so a re-sync after a reorder
+    never clobbers work already committed."""
+    year, month = _parse_month(req.month)
+    days_in_month = cal_mod.monthrange(year, month)[1]
+    first = date(year, month, 1)
+    last = date(year, month, days_in_month)
+    slot = "morning"
+
+    created: list[dict] = []
+    skipped_unresolved: list[str] = []
+    skipped_protected: list[str] = []
+    skipped_overflow: list[str] = []
+
+    with get_db() as conn:
+        # Resync-safe rebuild: drop this month's planned rows, keep posted/scheduled.
+        conn.execute(
+            """DELETE FROM calendar_posts
+               WHERE post_date BETWEEN ? AND ? AND status NOT IN ('posted', 'scheduled')""",
+            (str(first), str(last)),
+        )
+        for index, path in enumerate(req.file_paths):
+            if index >= days_in_month:
+                skipped_overflow.append(path)
+                continue
+            img = conn.execute(
+                "SELECT id, genre FROM images WHERE file_path = ?", (path,)
+            ).fetchone()
+            if not img:
+                skipped_unresolved.append(path)
+                continue
+            post_date = first + timedelta(days=index)
+            # After the delete above, any surviving row on this day+slot is posted
+            # or scheduled — an approved day we must not overwrite.
+            protected = conn.execute(
+                "SELECT id FROM calendar_posts WHERE post_date = ? AND post_time = ?",
+                (str(post_date), slot),
+            ).fetchone()
+            if protected:
+                skipped_protected.append(str(post_date))
+                continue
+            cur = conn.execute(
+                """INSERT INTO calendar_posts
+                   (post_date, post_time, pillar, genre, image_id, status)
+                   VALUES (?, ?, 'portfolio', ?, ?, 'planned')""",
+                (str(post_date), slot, img["genre"], img["id"]),
+            )
+            created.append(
+                {"id": cur.lastrowid, "post_date": str(post_date), "image_id": img["id"]}
+            )
+
+    return {
+        "month": req.month,
+        "year": year,
+        "created": len(created),
+        "posts": created,
+        "skipped_unresolved": skipped_unresolved,
+        "skipped_protected": skipped_protected,
+        "skipped_overflow": skipped_overflow,
+    }
 
 
 @router.patch("/calendar/{post_id}/posted")
@@ -790,6 +887,8 @@ def get_calendar_post(post_id: int):
                    i.narrative_hook, i.caption_seed_phrases,
                    i.recommended_caption_tone, i.recommended_pillar,
                    i.dominant_visual_element, i.viewer_emotion_target,
+                   i.texture_vocabulary, i.verb_seeds, i.visual_tension,
+                   i.subjects,
                    i.user_context, i.edited_from_id, i.manual_added
             FROM calendar_posts cp
             LEFT JOIN images i ON cp.image_id = i.id
@@ -1144,15 +1243,10 @@ def set_image_genre(image_id: int, req: ManualGenreRequest):
             (req.genre, image_id),
         )
 
-        # Remove from calendar if new genre isn't safe
-        _SAFE = {"nature", "landscape"}
+        # Calendar posts are genre-agnostic: the genre change relabels the post
+        # (above) but never removes it. Previously any non-nature/landscape image
+        # was auto-dropped from the calendar, which broke scheduling other content.
         removed = 0
-        if req.genre not in _SAFE:
-            cursor = conn.execute(
-                "DELETE FROM calendar_posts WHERE image_id = ? AND status NOT IN ('posted', 'scheduled')",
-                (image_id,),
-            )
-            removed = cursor.rowcount
 
     return {
         "image_id": image_id,
