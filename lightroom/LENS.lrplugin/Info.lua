@@ -39,7 +39,11 @@ return {
             title = "Push Calendar Order to LENS",
             file  = "LensCalendarOrder.lua",
         },
+        {
+            title = "Create This Year's Month Collections",
+            file  = "LensCalendarYear.lua",
+        },
     },
 
-    VERSION = { major=1, minor=10, revision=0 },
+    VERSION = { major=1, minor=11, revision=0 },
 }
