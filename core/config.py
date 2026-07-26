@@ -15,6 +15,11 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
+    # Comma-separated Ollama endpoints that hold the vision model, for spreading
+    # pass3 across the fleet. Empty means local only, which is the old behaviour.
+    # Concurrency on ONE box does nothing (a single 7b request saturates a GPU);
+    # concurrency across separate GPUs is real throughput.
+    vision_endpoints: str = ""
     vision_model: str = "qwen2.5vl:7b"
     text_model: str = "qwen2.5:14b"  # captions: 14b ~3x faster than 32b on M1 Max with marginal quality loss
 

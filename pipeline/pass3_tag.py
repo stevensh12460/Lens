@@ -69,7 +69,37 @@ essence of", "serene", "peaceful", "timeless"."""
 _PER_FILE_TIMEOUT = 600  # 10 min max per image
 
 
-async def _tag_single(image_path: Path, semaphore: asyncio.Semaphore) -> dict:
+# One vision client per fleet node. Concurrency on ONE box is pointless — a single
+# 7b request already saturates a GPU, measured at 23.8s/photo on the Mac whether it
+# ran 1 or 3 workers. Concurrency across SEPARATE GPUs is a different thing: each
+# node has its own silicon and its own power budget, so N nodes really is ~N times
+# the throughput.
+#
+# VISION_ENDPOINTS is a comma-separated list in .env. Empty or unset falls back to
+# the single local client, which is exactly the old behaviour.
+def _build_vision_clients() -> list:
+    raw = (getattr(settings, "vision_endpoints", "") or "").strip()
+    if not raw:
+        return [ollama]
+    from core.ollama import DEFAULT_VISION_CTX, OllamaClient
+    out = []
+    for ep in [e.strip() for e in raw.split(",") if e.strip()]:
+        out.append(OllamaClient(
+            text_model=settings.text_model,
+            vision_model=settings.vision_model,
+            mode_flag_path=Path("/tmp/lens_mode"),
+            base_url=ep,
+            vision_ctx=DEFAULT_VISION_CTX,
+        ))
+    return out or [ollama]
+
+
+_CLIENTS = _build_vision_clients()
+
+
+async def _tag_single(image_path: Path, semaphore: asyncio.Semaphore,
+                      client=None) -> dict:
+    client = client or ollama
     async with semaphore:
         try:
             prep_path = preprocess(image_path)
@@ -77,7 +107,7 @@ async def _tag_single(image_path: Path, semaphore: asyncio.Semaphore) -> dict:
             # (narrative_hook + seed phrases + tone + pillar + dominant + emotion target
             # add ~150-200 tokens of output).
             result = await asyncio.wait_for(
-                ollama.vision_json(prep_path, _TAG_PROMPT, num_predict=768),
+                client.vision_json(prep_path, _TAG_PROMPT, num_predict=768),
                 timeout=_PER_FILE_TIMEOUT,
             )
 
@@ -146,9 +176,49 @@ async def _tag_single(image_path: Path, semaphore: asyncio.Semaphore) -> dict:
 
 
 async def process_batch_async(image_paths: list[Path]) -> list[dict]:
-    semaphore = asyncio.Semaphore(_WORKERS)
-    tasks = [_tag_single(path, semaphore) for path in image_paths]
-    return await asyncio.gather(*tasks)
+    """Spread the batch across the fleet, pulling work rather than dealing it.
+
+    Round-robin was tried first and is wrong: it hands every node an equal share, so
+    the batch cannot finish before the SLOWEST node finishes its portion. Measured on
+    12 photos across four nodes it came to 54.1s/photo, more than twice the 23.8s the
+    Mac achieves alone, because one node was running on CPU and everything waited for
+    it.
+
+    A shared queue self-balances instead. Each node loops taking the next photo when
+    it is free, so a fast box simply does more of them and a slow box cannot hold the
+    batch hostage. Nothing needs to know how fast any node is, which matters because
+    these are four different GPUs and their relative speed changes with what else is
+    running on them.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    for i, path in enumerate(image_paths):
+        queue.put_nowait((i, path))
+
+    results: list = [None] * len(image_paths)
+
+    # ONE SEMAPHORE PER NODE, not one shared. A single shared Semaphore(1) means only
+    # one photo is in flight across the WHOLE fleet — the dealer hands out a card and
+    # waits for it to come back before dealing the next, which is serial with extra
+    # steps. Measured that way: every node got exactly 5 of 15 photos and the Mac
+    # averaged 91.1s a photo against the 21.1s it does alone.
+    #
+    # With its own semaphore each node pulls the next photo the moment it is free, so
+    # a fast card simply does more of them and a slow one never holds anyone up.
+    sems = {id(c): asyncio.Semaphore(_WORKERS) for c in _CLIENTS}
+
+    async def worker(client):
+        while True:
+            try:
+                i, path = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                results[i] = await _tag_single(path, sems[id(client)], client)
+            finally:
+                queue.task_done()
+
+    await asyncio.gather(*(worker(c) for c in _CLIENTS))
+    return results
 
 
 def process_batch(image_paths: list[Path]) -> list[dict]:
