@@ -143,6 +143,22 @@ def is_paused() -> bool:
     return _PAUSED_FILE.exists()
 
 
+def _pass1_waiting() -> bool:
+    """Is there cull work queued that would actually want the RAM back?
+
+    The waterfall no longer drains pass1 before pass3 starts, so this is checked
+    fresh after each batch: the watcher can ingest a card mid-run and put real cull
+    work in the queue, and only then is evicting a model worth the reload it costs.
+    """
+    try:
+        with get_db() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM pipeline_jobs WHERE job_type='pass1' AND status='queued'"
+            ).fetchone()[0] > 0
+    except Exception:
+        return False
+
+
 async def _unload_llm() -> None:
     """Tell Ollama to release the model from RAM immediately after a batch completes.
     Frees ~20GB so the cull pass has full memory for rawpy decoding."""
@@ -696,8 +712,15 @@ async def run_full_pipeline_loop() -> None:
             if processed:
                 logger.info(f"[waterfall] pass2: {p2_queued} queued — draining before pass3")
 
-        # --- Pass 3 (vision tagging, LLM) — runs after pass2 fully drains, needs auto or priority mode ---
-        elif p3_queued > 0:
+        # --- Pass 3 (vision tagging, LLM) ---
+        # Deliberately `if`, not `elif`. The strict drain-in-order waterfall existed
+        # to protect ONE machine: pass1 is CPU + rawpy and pass3 was GPU, and on a
+        # single Mac they fight for the same memory. That is no longer the shape —
+        # two of the three vision nodes are remote (ggcomp, omnissiah) and take
+        # roughly 12 of every 15 photos, so pass1 culling locally no longer competes
+        # with most of the vision work. Letting them share an iteration means a fresh
+        # card dump does not stall tagging until the whole cull drains.
+        if p3_queued > 0:
             if current_mode not in ("auto", "priority"):
                 logger.debug(f"[waterfall] pass3: {p3_queued} queued — waiting for auto mode")
             else:
@@ -706,7 +729,17 @@ async def run_full_pipeline_loop() -> None:
                     p3 = await asyncio.wait_for(run_pass_async("pass3"), timeout=_P3_TIMEOUT)
                     if p3:
                         processed += p3
-                        await _unload_llm()
+                        # No unconditional unload here any more. It existed to free
+                        # ~20GB for the cull pass, but OLLAMA_MAX_LOADED_MODELS=1
+                        # already evicts whatever is resident the moment another
+                        # model loads — verified: loading the 7b leaves ONLY the 7b.
+                        # Meanwhile the unload targeted qwen2.5vl:32b specifically,
+                        # which pass3 does not use and Kitchen Window's captioning
+                        # does, so every batch cost KW a ~41s reload for nothing.
+                        # If a cull genuinely needs the RAM back, the block below
+                        # frees it when there is actually pass1 work waiting.
+                        if _pass1_waiting():
+                            await _unload_llm()
                 except asyncio.TimeoutError:
                     logger.warning("[pass3] timed out — resetting running job")
                     with get_db() as conn:
