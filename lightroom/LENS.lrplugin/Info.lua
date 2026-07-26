@@ -43,7 +43,11 @@ return {
             title = "Create This Year's Month Collections",
             file  = "LensCalendarYear.lua",
         },
+        {
+            title = "Create Genre Smart Collections",
+            file  = "LensGenreCollections.lua",
+        },
     },
 
-    VERSION = { major=1, minor=12, revision=0 },
+    VERSION = { major=1, minor=13, revision=0 },
 }
