@@ -41,6 +41,11 @@ local SAMPLE_SIZE = 1000  -- timing-test size
 
 -- Must stay in sync with _TIER_BANDS / _status_for in api/routes/lightroom.py.
 local TIERS    = { "Exceptional", "Strong", "Solid", "Weak", "Low" }
+-- Genre comes from pass3_tag.py, the vision pass. Its prompt offers the first six;
+-- landscape and concert also exist in the database from earlier runs. Title-cased for
+-- display, matched case-insensitively against the stored lowercase value.
+local GENRES   = { "Portrait", "Boudoir", "Wedding", "Commercial", "Events",
+                   "Nature", "Landscape", "Concert" }
 local STATUSES = { "Posted", "Print", "Portfolio", "Ready", "Scored",
                    "Pending", "Burst", "Culled", "Missing",
                    "Corrupt", "Video", "Sidecar" }
@@ -121,15 +126,21 @@ LrTasks.startAsyncTask(function()
         -- ------------------------------------------------------------------
         -- Keyword hierarchy, created once. Non-fatal if it fails.
         -- ------------------------------------------------------------------
-        local tierKw, statusKw = {}, {}
-        local tierRoot, statusRoot   -- hoisted: needed to identify stale labels
+        local tierKw, statusKw, genreKw = {}, {}, {}
+        local tierRoot, statusRoot, genreRoot   -- hoisted: needed to identify stale labels
         local keywordsOk, keywordErr = LrTasks.pcall(function()
             catalog:withWriteAccessDo("LENS keywords", function()
                 local lensRoot = catalog:createKeyword("LENS",   {}, false, nil,      true)
                 tierRoot       = catalog:createKeyword("Tier",   {}, false, lensRoot, true)
                 statusRoot     = catalog:createKeyword("Status", {}, false, lensRoot, true)
+                -- A real keyword, not a plugin metadata field. Lightroom smart
+                -- collections filter on keywords reliably, they are visible in the
+                -- Keyword List, and they survive export — none of which is true of
+                -- custom plugin metadata.
+                genreRoot      = catalog:createKeyword("Genre",  {}, false, lensRoot, true)
                 for _, t in ipairs(TIERS)    do tierKw[t]   = catalog:createKeyword(t, {}, false, tierRoot,   true) end
                 for _, s in ipairs(STATUSES) do statusKw[s] = catalog:createKeyword(s, {}, false, statusRoot, true) end
+                for _, g in ipairs(GENRES)   do genreKw[g:lower()] = catalog:createKeyword(g, {}, false, genreRoot, true) end
             end)
         end)
 
@@ -198,7 +209,8 @@ LrTasks.startAsyncTask(function()
                                         if existing then
                                             for _, kw in ipairs(existing) do
                                                 local parent = kw:getParent()
-                                                if parent and (parent == tierRoot or parent == statusRoot) then
+                                                if parent and (parent == tierRoot or parent == statusRoot
+                                                               or parent == genreRoot) then
                                                     photo:removeKeyword(kw)
                                                 end
                                             end
@@ -206,8 +218,10 @@ LrTasks.startAsyncTask(function()
 
                                         local tk = r.tier   and tierKw[r.tier]
                                         local sk = r.status and statusKw[r.status]
+                                        local gk = r.genre and genreKw[tostring(r.genre):lower()]
                                         if tk then photo:addKeyword(tk) end
                                         if sk then photo:addKeyword(sk) end
+                                        if gk then photo:addKeyword(gk) end
                                     end
                                 else
                                     missing = missing + 1

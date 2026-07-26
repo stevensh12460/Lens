@@ -1,8 +1,8 @@
 --[[
 LensGenreCollections.lua — build the genre smart collections, in a "Genres" set.
 
-One smart collection per genre LENS actually assigns, filtering on the LENS Genre
-custom metadata field. These live in the NORMAL Collections panel, not under a
+One smart collection per genre LENS actually assigns, filtering on the keyword that
+"Pull LENS Results" writes under LENS > Genre >. These live in the NORMAL Collections panel, not under a
 publish service: they are for finding work, while a month collection under LENS
 Calendar is for ordering it. The calendar deliberately refuses smart collections
 because its sync maps position N to day N and needs manual drag order.
@@ -71,12 +71,17 @@ LrTasks.startAsyncTask(function()
                 if existing[name] then
                     table.insert(skipped, name)
                 else
-                    -- Custom plugin metadata is addressed as
-                    -- "sdktext:<toolkit id>.<field id>" in a smart collection rule.
+                    -- Filter on the KEYWORD, not the plugin metadata field.
+                    -- "Pull LENS Results" writes a real keyword under LENS > Genre >,
+                    -- and Lightroom filters keywords reliably: they show in the Keyword
+                    -- List, they are searchable everywhere, and they survive export.
+                    -- Custom plugin metadata needs an "sdktext:<plugin>.<field>"
+                    -- criteria whose behaviour varies by SDK version, which is a poor
+                    -- thing to depend on for the panel Steven browses every day.
                     local searchDesc = {
-                        criteria  = "sdktext:" .. _PLUGIN.id .. ".lensGenre",
-                        operation = "==",
-                        value     = g,
+                        criteria  = "keywords",
+                        operation = "words",
+                        value     = name,
                     }
                     local ok, err = LrTasks.pcall(function()
                         catalog:createSmartCollection(name, searchDesc, set, true)
@@ -98,9 +103,10 @@ LrTasks.startAsyncTask(function()
         if #failed > 0 then
             msg = msg .. "\n\nFailed:\n" .. table.concat(failed, "\n")
         end
-        msg = msg .. "\n\nThese filter on LENS Genre, so run \"Pull LENS Results\" " ..
-                     "on photos first or they will look empty. Genre is set on " ..
-                     "roughly 29,600 of the library; the rest have none yet."
+        msg = msg .. "\n\nThese filter on the LENS > Genre > keywords, so run " ..
+                     "\"Pull LENS Results\" on photos first or they will look empty. " ..
+                     "Genre is set on roughly 29,600 of the library; the rest have " ..
+                     "not been through pass 3 yet."
         LrDialogs.message("LENS Genres", msg, #failed > 0 and "warning" or "info")
     end)
 end)
