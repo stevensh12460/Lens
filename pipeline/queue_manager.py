@@ -23,7 +23,17 @@ logger = logging.getLogger("lens.queue")
 
 _BATCH_SIZE = 50
 _LLM_BATCH_SIZE = 20    # pass1_raw: ~9s/img, 20 images ≈ 3min batch
-_P3_BATCH_SIZE = 1      # pass3: ~580s/img — process one at a time, unload between
+# pass3 hands its batch to pass3_tag.process_batch_async, which runs _WORKERS = 3
+# concurrently behind a semaphore. A batch of 1 meant those workers never had more
+# than one photo between them, so pass3 ran strictly serial and paid the loop and
+# unload overhead per image.
+#
+# The "~580s/img" this used to say was measured when pass3 ran the 32b. It runs
+# qwen2.5vl:7b now (VISION_MODEL), and measured on 10 real queue photos with the
+# model warm it is 26.5s each serial — first photo 46.8s including a ~20s load.
+# 12 is four full rounds of 3 workers, ~106s a batch, comfortably inside the 900s
+# _P3_TIMEOUT even if the workers gained nothing at all.
+_P3_BATCH_SIZE = 12
 _POLL_INTERVAL = 5  # seconds
 _WORKERS = {"pass1": 6, "pass2": 2}  # concurrent workers per pass type (default 1)
 _last_report_time = 0

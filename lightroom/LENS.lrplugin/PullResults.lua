@@ -45,7 +45,7 @@ local TIERS    = { "Exceptional", "Strong", "Solid", "Weak", "Low" }
 -- landscape and concert also exist in the database from earlier runs. Title-cased for
 -- display, matched case-insensitively against the stored lowercase value.
 local GENRES   = { "Portrait", "Boudoir", "Wedding", "Commercial", "Events",
-                   "Nature", "Landscape", "Concert" }
+                   "Nature", "Food", "Landscape", "Concert" }
 local STATUSES = { "Posted", "Print", "Portfolio", "Ready", "Scored",
                    "Pending", "Burst", "Culled", "Missing",
                    "Corrupt", "Video", "Sidecar" }

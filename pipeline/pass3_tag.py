@@ -14,7 +14,13 @@ from core.ollama import ollama
 from pipeline.preprocessor import preprocess
 from lens_core.tz import now_et
 
-_WORKERS = 3
+# ONE at a time. Three was measured against one on this machine and lost: 26.5s per
+# photo serial, versus 30-31s per photo with three workers, whether or not Ollama was
+# allowed to serve them in parallel (OLLAMA_NUM_PARALLEL=3 was tried and reverted).
+# A single 7b request already saturates the Mac's GPU, so concurrency only
+# time-slices the same silicon and adds contention. It also keeps pass3 out of the
+# way of anything else wanting the GPU.
+_WORKERS = 1
 
 _TAG_PROMPT = """You are a working photographer reviewing your own image for portfolio
 + social use. Look at it the way you would in front of a print: what is actually
@@ -23,7 +29,7 @@ in the frame, what light is doing, where the eye lands, what the image is about.
 Respond with ONLY a valid JSON object — no explanation, no markdown, no code fences.
 
 {
-  "genre": one of: wedding | portrait | boudoir | commercial | events | nature,
+  "genre": one of: wedding | portrait | boudoir | commercial | events | nature | food | landscape | concert,
   "mood": string. concrete + specific (e.g. "humid afternoon stillness", "post-storm relief"). avoid "serene", "peaceful", "moody".
   "lighting": string. name the light source AND its direction (e.g. "low east sun, raked across stone", "overcast, soft from camera-left", "single window, warm, behind subject").
   "subject_type": string (e.g. "couple", "solo portrait", "group", "landscape", "product"),

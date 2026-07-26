@@ -29,7 +29,7 @@ local SET_NAME = "Genres"
 -- will actually open at the top of the set.
 local GENRES = {
     "portrait", "events", "boudoir", "commercial",
-    "wedding", "nature", "landscape", "concert",
+    "wedding", "nature", "food", "landscape", "concert",
 }
 
 -- Title case for display; the FILTER matches the stored lowercase value.
