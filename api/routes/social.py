@@ -489,6 +489,15 @@ def _parse_month(label: str) -> tuple[int, int]:
     )
 
 
+# Genres that must never reach Instagram, whatever else happens. Boudoir is shot for
+# the client and for Steven to review, never to publish — his rule, stated plainly.
+# Enforced at all three gates rather than one, because the cost of a mistake here is
+# not a bad caption, it is publishing someone's private session. sync-month refuses to
+# plan it, the approval endpoint refuses to schedule it, and post_scheduler refuses to
+# send it even if a row somehow reached 'scheduled'.
+NEVER_PUBLISH_GENRES = {"boudoir"}
+
+
 @router.post("/calendar/sync-month")
 def sync_month(req: MonthSyncRequest):
     """Turn a Lightroom month collection's ordered photos into planned calendar
@@ -506,6 +515,7 @@ def sync_month(req: MonthSyncRequest):
     skipped_unresolved: list[str] = []
     skipped_protected: list[str] = []
     skipped_overflow: list[str] = []
+    skipped_private: list[str] = []
 
     with get_db() as conn:
         # Resync-safe rebuild: drop this month's planned rows, keep posted/scheduled.
@@ -523,6 +533,12 @@ def sync_month(req: MonthSyncRequest):
             ).fetchone()
             if not img:
                 skipped_unresolved.append(path)
+                continue
+            if (img["genre"] or "").lower() in NEVER_PUBLISH_GENRES:
+                # Dragged into the month collection by accident. Skip the DAY too,
+                # rather than sliding everything up a slot, so the rest of the month
+                # keeps the position-to-day mapping the photographer arranged.
+                skipped_private.append(path)
                 continue
             post_date = first + timedelta(days=index)
             # After the delete above, any surviving row on this day+slot is posted
@@ -552,6 +568,7 @@ def sync_month(req: MonthSyncRequest):
         "skipped_unresolved": skipped_unresolved,
         "skipped_protected": skipped_protected,
         "skipped_overflow": skipped_overflow,
+        "skipped_private": skipped_private,
     }
 
 
@@ -675,13 +692,25 @@ def approve_post(post_id: int):
     """Move a planned post to 'scheduled' status, arming it for auto-posting."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, post_date, post_time, status FROM calendar_posts WHERE id = ?",
+            """SELECT cp.id, cp.post_date, cp.post_time, cp.status,
+                      COALESCE(cp.genre, i.genre) AS genre
+               FROM calendar_posts cp
+               LEFT JOIN images i ON i.id = cp.image_id
+               WHERE cp.id = ?""",
             (post_id,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Post {post_id} not found")
 
         post = dict(row)
+        # Second gate. A row can predate the sync-month check, or have been created by
+        # another path, so approval refuses it again rather than trusting how it got here.
+        if (post.get("genre") or "").lower() in NEVER_PUBLISH_GENRES:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Post {post_id} is genre '{post['genre']}', which is never "
+                       f"published. Remove it from the calendar instead.",
+            )
         if post["status"] not in ("planned",):
             raise HTTPException(
                 status_code=400,

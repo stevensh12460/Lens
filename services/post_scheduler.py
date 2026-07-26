@@ -60,6 +60,13 @@ AUTO_PUBLISH_WINDOW_MIN = 15
 # without checking anything. Provides an emergency off-switch independent of launchd.
 KILL_SWITCH = Path.home() / "lens" / "AUTO_PUBLISH_DISABLED"
 
+# Genres that must never be published, checked here as the LAST gate before an
+# irreversible action. api/routes/social.py refuses to plan or approve them, but this
+# is the only place that actually calls Instagram, so it refuses too rather than
+# assuming a row reaching 'scheduled' was vetted. Boudoir is shot for the client and
+# for Steven to review, never to publish.
+NEVER_PUBLISH_GENRES = {"boudoir"}
+
 
 def _build_caption(post: dict) -> str:
     """Combine caption body + hashtags into the final IG caption string."""
@@ -273,8 +280,10 @@ async def auto_publish_due(
     with get_db() as conn:
         rows = conn.execute(
             """SELECT cp.id, cp.post_date, cp.post_time, cp.scheduled_at, cp.status,
-                      cp.image_id, cp.caption, cp.hashtags
+                      cp.image_id, cp.caption, cp.hashtags,
+                      COALESCE(cp.genre, i.genre) AS genre
                FROM calendar_posts cp
+               LEFT JOIN images i ON i.id = cp.image_id
                WHERE cp.status = 'scheduled' AND cp.scheduled_at IS NOT NULL""",
         ).fetchall()
 
@@ -283,6 +292,16 @@ async def auto_publish_due(
     for row in rows:
         post = dict(row)
         post_id = post["id"]
+
+        # Never-publish genres are refused here, loudly, whatever their status. This
+        # is the last point before the API call, so it does not trust that an earlier
+        # gate ran. Logged at WARNING because a row getting this far means something
+        # upstream let it through and should be looked at.
+        genre = (post.get("genre") or "").lower()
+        if genre in NEVER_PUBLISH_GENRES:
+            log.warning(f"post {post_id}: genre '{genre}' is never published — refusing")
+            summary["skipped"].append({"id": post_id, "reason": f"never-publish genre: {genre}"})
+            continue
 
         # Parse scheduled_at as tz-aware ET. parse_et() promotes legacy naive
         # values to ET to keep older rows behaving correctly while we backfill.
