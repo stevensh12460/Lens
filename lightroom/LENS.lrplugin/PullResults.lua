@@ -3,9 +3,20 @@
     Lightroom. Handles BOTH the current selection and the whole catalog; you
     pick the scope when it runs.
 
-    AUTHORITY RULE: Steven's stars are ground truth. This writes ONLY plugin
-    custom metadata and the removable "LENS" keyword branch. It never writes
-    rating, pickStatus, or colorNameForLabel. Keep it that way.
+    AUTHORITY RULE: Steven's stars are ground truth. This never writes pickStatus
+    or colorNameForLabel, and it NEVER overwrites a rating he has set.
+
+    It now writes a star rating in ONE case only: the photo currently has no
+    rating (0 or nil) and LENS has a tier for it. A photo he has rated 1-5 keeps
+    that rating forever — the guard is checked per photo, immediately before the
+    write, not inferred from anything cached. That makes the stars a starting
+    point on unrated work, never a correction of his judgement.
+
+    The mapping uses the percentile-anchored tier bands from
+    api/routes/lightroom.py, so it reflects the real score distribution
+    (min 4.59, max 7.33, mean 6.00) rather than a theoretical 0-10 scale:
+      Exceptional (top 1%)  = 5     Strong (top 5%)  = 4
+      Solid       (top 25%) = 3     Weak   (top 50%) = 2      Low = 1
 
     HARD-WON LIGHTROOM CONSTRAINTS (all three cost us a debug cycle):
 
@@ -41,6 +52,16 @@ local SAMPLE_SIZE = 1000  -- timing-test size
 
 -- Must stay in sync with _TIER_BANDS / _status_for in api/routes/lightroom.py.
 local TIERS    = { "Exceptional", "Strong", "Solid", "Weak", "Low" }
+
+-- Tier to star. Five tiers, five stars, and the tiers are already percentile
+-- anchored so the top of the library really is the top.
+local TIER_STARS = {
+    Exceptional = 5,
+    Strong      = 4,
+    Solid       = 3,
+    Weak        = 2,
+    Low         = 1,
+}
 -- Genre comes from pass3_tag.py, the vision pass. Its prompt offers the first six;
 -- landscape and concert also exist in the database from earlier runs. Title-cased for
 -- display, matched case-insensitively against the stored lowercase value.
@@ -218,6 +239,17 @@ LrTasks.startAsyncTask(function()
 
                                         local tk = r.tier   and tierKw[r.tier]
                                         local sk = r.status and statusKw[r.status]
+                                        -- Stars, but ONLY on photos he has not rated.
+                                        -- getRawMetadata is read fresh per photo so a
+                                        -- rating set five minutes ago still wins.
+                                        local star = r.tier and TIER_STARS[r.tier]
+                                        if star then
+                                            local existing = photo:getRawMetadata("rating")
+                                            if existing == nil or existing == 0 then
+                                                photo:setRawMetadata("rating", star)
+                                            end
+                                        end
+
                                         local gk = r.genre and genreKw[tostring(r.genre):lower()]
                                         if tk then photo:addKeyword(tk) end
                                         if sk then photo:addKeyword(sk) end
