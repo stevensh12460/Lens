@@ -183,6 +183,7 @@ LrTasks.startAsyncTask(function()
                                     photo:setPropertyForPlugin(_PLUGIN, "lensStatus",   r.status     or "")
                                     photo:setPropertyForPlugin(_PLUGIN, "lensNote",     r.note       or "")
                                     photo:setPropertyForPlugin(_PLUGIN, "lensWeakness", r.weakness or "")
+                                    photo:setPropertyForPlugin(_PLUGIN, "lensGenre",    r.genre    or "")
                                     photo:setPropertyForPlugin(_PLUGIN, "lensSyncedAt", stamp)
                                     written = written + 1
                                     if (r.lens_score or "") == "" then noScore = noScore + 1 end

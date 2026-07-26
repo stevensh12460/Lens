@@ -40,6 +40,16 @@ return {
         },
 
         {
+            -- The field that makes genre smart collections possible. LENS knows the
+            -- genre (portrait, boudoir, wedding, landscape); Lightroom did not, and
+            -- a smart collection can only filter on what the catalog holds.
+            id         = "lensGenre",
+            title      = "LENS Genre",
+            dataType   = "string",
+            searchable = true,
+            browsable  = true,
+        },
+        {
             id         = "lensWeakness",
             title      = "LENS Weakness",
             dataType   = "string",
@@ -66,7 +76,7 @@ return {
 
     },
 
-    schemaVersion = 2,
+    schemaVersion = 3,
 
     -- Supplying this is what tells Lightroom the version bump is intentional
     -- and existing values should be carried forward. A no-op body is enough:

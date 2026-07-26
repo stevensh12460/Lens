@@ -445,7 +445,12 @@ def _tsv(rows: list) -> str:
 
     Note text is stripped of tabs/newlines so a row can never break the format.
     """
-    out = ["file_path\tlens_score\ttier\tstatus\tnote\tweakness"]
+    # genre was already being SELECTed by _RESULT_COLS and dropped here. It is the
+    # one LENS field that maps to how Steven actually browses (portrait, boudoir,
+    # wedding, landscape), and a Lightroom smart collection can only filter on what
+    # the catalog knows — so it has to travel to become a custom metadata field.
+    # Appended LAST so the plugin's existing column offsets are untouched.
+    out = ["file_path\tlens_score\ttier\tstatus\tnote\tweakness\tgenre"]
     for r in rows:
         note = (r.get("note") or "")
         for ch in ("\t", "\r", "\n"):
@@ -457,6 +462,7 @@ def _tsv(rows: list) -> str:
             r.get("status") or "",
             note,
             r.get("weakness") or "",
+            r.get("genre") or "",
         ]))
     return "\n".join(out)
 

@@ -246,6 +246,9 @@ local function parseTSV(text)
                     status     = cols[4] or "",
                     note       = cols[5] or "",
                     weakness   = cols[6] or "",
+                    -- Appended last by the server, so older responses without it
+                    -- simply yield "" here rather than shifting any other column.
+                    genre      = cols[7] or "",
                 })
             end
         end
