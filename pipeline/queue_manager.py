@@ -39,6 +39,31 @@ _WORKERS = {"pass1": 6, "pass2": 2}  # concurrent workers per pass type (default
 _last_report_time = 0
 _social_eval_counter = 0
 
+# Paths that hold image FILES but no photographs. LENS walks directories looking
+# for images, so it picked up two classes of app-internal asset:
+#
+#   FinalAE####.jpg  — an After Effects render of one video, exported as 4,599
+#                      sequentially numbered JPGs (390 distinct capture times).
+#                      Sequential numbering means burst detection reads the whole
+#                      render as a single 4,598-frame burst.
+#   /animator/       — Adobe Character Animator projects. Every file under it is
+#                      PNG puppet artwork, most of it inside Ch Data/*.noindex
+#                      asset caches. Verified: no photographs anywhere in the tree.
+#
+# Vision-tagging these spends GPU time to assign a genre to things that are not
+# photos. Filtered at BOTH ends: _auto_promote so they are never enqueued, and
+# _fetch_jobs so any row already queued is never handed to a worker.
+_NON_PHOTO_PATTERNS = (
+    "%FinalAE%",
+    "%/animator/%",
+    "%.noindex/%",
+)
+
+
+def _non_photo_filter(col: str) -> str:
+    """SQL AND-clauses excluding non-photograph paths for the given column."""
+    return " ".join(f"AND {col} NOT LIKE '{p}'" for p in _NON_PHOTO_PATTERNS)
+
 # DB write lock — prevents concurrent SQLite writes from overlapping
 _db_write_lock = threading.Lock()
 
@@ -190,6 +215,7 @@ def _fetch_batch(job_type: str) -> list[dict]:
                AND j.attempts < {_MAX_ATTEMPTS}
                AND i.file_name NOT LIKE '.\\_%' ESCAPE '\\'
                AND COALESCE(i.pass1_status, 'pending') NOT IN ('fail', 'missing', 'sidecar', 'corrupt', 'video')
+               {_non_photo_filter('i.file_path')}
                {priority_filter}
                ORDER BY j.priority DESC, j.queued_at ASC
                LIMIT ?""",
@@ -449,10 +475,11 @@ def _auto_promote() -> int:
         #   < 6.0 → never promoted (not worth GPU time — viewable in Images tab, manual rescue available)
         if p1_active == 0 and p2_active == 0:
             # Tier 1: high-scoring images (>= 6.5) — priority 10
-            tier1 = conn.execute("""
+            tier1 = conn.execute(f"""
                 SELECT i.file_path FROM images i
                 WHERE i.pass2_at IS NOT NULL AND i.pass3_at IS NULL
                 AND i.nima_composite >= 6.5
+                {_non_photo_filter('i.file_path')}
                 AND i.file_path NOT IN (
                     SELECT i2.file_path FROM pipeline_jobs j2
                     JOIN images i2 ON j2.image_id = i2.id
@@ -465,10 +492,11 @@ def _auto_promote() -> int:
             promoted += len(tier1)
 
             # Tier 2: decent images (6.0–6.5) — priority 3 (after top tier)
-            tier2 = conn.execute("""
+            tier2 = conn.execute(f"""
                 SELECT i.file_path FROM images i
                 WHERE i.pass2_at IS NOT NULL AND i.pass3_at IS NULL
                 AND i.nima_composite >= 6.0 AND i.nima_composite < 6.5
+                {_non_photo_filter('i.file_path')}
                 AND i.file_path NOT IN (
                     SELECT i2.file_path FROM pipeline_jobs j2
                     JOIN images i2 ON j2.image_id = i2.id
